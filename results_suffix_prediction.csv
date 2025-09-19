@@ -1,0 +1,4 @@
+seed,model,lambda,d_model,er_loss,no_epochs,avg_dl_distance
+56,SDFA_suffix_model,0.1,8,True,10,6.5659090909090905
+56,SDFA_suffix_model,0.2,8,True,10,6.489772727272728
+56,SDFA_suffix_model,0.5,8,True,10,6.6261363636363635

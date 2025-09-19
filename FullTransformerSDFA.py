@@ -12,14 +12,16 @@ from torch.nn import functional as F
 import editdistance
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
+from model_help import PositionalEncoding, entropic_relevance_diff_loss, entropic_relevance_loss
+
 device = torch.device("cpu" if torch.backends.mps.is_available() else "cpu")
 print(f"Using device: {device}")
 
 class EventTransformer(nn.Module):
-    def __init__(self, vocab_size, d_model=128, nhead=4, num_layers=2, dropout=0.1):
+    def __init__(self, vocab_size, embedding, pos_encoder, d_model=128, nhead=4, num_layers=2, dropout=0.1):
         super().__init__()
-        self.embedding = nn.Embedding(vocab_size + 1, d_model)
-        self.pos_encoder = PositionalEncoding(d_model, dropout)
+        self.embedding = embedding #nn.Embedding(vocab_size + 1, d_model, padding_idx=0)
+        self.pos_encoder = pos_encoder #PositionalEncoding(d_model, dropout)
 
         encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dropout=dropout, batch_first=True)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
@@ -33,23 +35,6 @@ class EventTransformer(nn.Module):
         output = self.transformer_encoder(embedded, src_key_padding_mask=src_key_padding_mask)
         return output
     
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, dropout=0.1, max_len=500):
-        super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
-
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-
-        pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        x = x + self.pe[:, :x.size(1), :]
-        return self.dropout(x)
 
 class SDFAProjector(nn.Module):
     def __init__(self, d_model, sdfa_shape):
@@ -71,7 +56,7 @@ class SingleTokenDecoder(nn.Module):
         self.pooling = pooling
         if pooling == "learnable":
             self.attn = nn.Linear(d_model, 1)   # (B, T, 1)
-        self.cls = nn.Linear(d_model, vocab_size)
+        self.cls = nn.Linear(d_model, vocab_size + 1)
 
     def forward(self, encoded):
         if self.pooling == "mean":
@@ -90,7 +75,7 @@ class SuffixDecoder(nn.Module):
     def __init__(self, d_model, vocab_size):
         super().__init__()
         self.decoder = nn.GRU(d_model, d_model, batch_first=True)
-        self.output = nn.Linear(d_model, vocab_size)
+        self.output = nn.Linear(d_model, vocab_size + 1)
 
     def forward(self, encoded):
         out, _ = self.decoder(encoded)
@@ -104,13 +89,43 @@ class TransformerDecoder(nn.Module):
         self.d_model = d_model
         decoder_layer = nn.TransformerDecoderLayer(d_model=d_model, nhead=nhead, dropout=dropout, batch_first=True)
         self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
-        self.output = nn.Linear(d_model, vocab_size)
+        self.output = nn.Linear(d_model, vocab_size + 1)
 
     def forward(self, encoded):
         seq_len = encoded.size(1)
         causal_mask = nn.Transformer.generate_square_subsequent_mask(seq_len).to(encoded.device)
         out = self.transformer_decoder(tgt=encoded, memory=encoded, tgt_mask=causal_mask)
         logits = self.output(out)
+        return logits
+    
+
+class TransformerSuffixDecoder(nn.Module):
+    def __init__(self, d_model, vocab_size, embedding, pos_encoder, nhead=4, num_layers=2, dropout=0.1):
+        super().__init__()
+        self.d_model = d_model
+
+        self.embedding = embedding #nn.Embedding(vocab_size + 1, d_model, padding_idx=0)
+        self.pos_encoding = pos_encoder #PositionalEncoding(d_model, dropout=dropout)
+
+        decoder_layer = nn.TransformerDecoderLayer(d_model=d_model, nhead=nhead, dropout=dropout, batch_first=True)
+        self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
+        self.output = nn.Linear(d_model, vocab_size + 1)
+
+    def forward(self, y_in, memory, tgt_mask=None, memory_mask=None,
+                tgt_key_padding_mask=None, memory_key_padding_mask=None):
+        
+        y_emb = self.embedding(y_in) * math.sqrt(self.d_model)
+        y_emb = self.pos_encoding(y_emb)
+
+        if tgt_mask is None:
+            tgt_len = y_in.size(1)
+            tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_len).to(y_in.device)
+
+        out = self.transformer_decoder(
+            tgt=y_emb, memory=memory, tgt_mask=tgt_mask,memory_mask=memory_mask,
+            tgt_key_padding_mask=tgt_key_padding_mask, memory_key_padding_mask=memory_key_padding_mask,
+        )
+        logits = self.output(out) 
         return logits
 
 
@@ -155,62 +170,32 @@ class NAP_model(nn.Module):
 class SDFA_suffix_model(nn.Module):
     def __init__(self, vocab_size, d_model, sdfa_shape):
         super().__init__()
-        self.encoder = EventTransformer(vocab_size, d_model=d_model)
+        self.embedding = nn.Embedding(vocab_size + 1 + 1, d_model, padding_idx=0)
+        self.pos_encoder = PositionalEncoding(d_model, 0.1)
+
+        self.encoder = EventTransformer(vocab_size, embedding=self.embedding, pos_encoder=self.pos_encoder, d_model=d_model)
         self.sdfa_proj = SDFAProjector(d_model, sdfa_shape)
-        # self.suffix_decoder = SuffixDecoder(d_model, vocab_size)
+        self.suffix_decoder = TransformerSuffixDecoder(d_model, vocab_size, self.embedding, self.pos_encoder)
+    
+    def forward(self, x, mask, y_in):
+        encoded = self.encoder(x, mask)
+        sdfa = self.sdfa_proj(encoded)
+        suffix_logits = self.suffix_decoder(y_in, encoded, memory_key_padding_mask=~mask)
+
+        return sdfa, suffix_logits
+    
+
+class suffix_model(nn.Module):
+    def __init__(self, vocab_size, d_model, sdfa_shape):
+        super().__init__()
+        self.encoder = EventTransformer(vocab_size, d_model=d_model)
         self.suffix_decoder = TransformerDecoder(d_model, vocab_size)
 
     def forward(self, x, mask):
         encoded = self.encoder(x, mask)
-        sdfa = self.sdfa_proj(encoded)
         suffix_logits = self.suffix_decoder(encoded)
-        return sdfa, suffix_logits
+        return suffix_logits
 
-
-def entropic_relevance_loss(sdfa_pred, sequences, num_symbols, eps=1e-9):
-    # start van sequenties en maakt ground truth SDFA
-
-    B, S, _ = sdfa_pred.shape
-    device = sdfa_pred.device
-
-    s = sdfa_pred.clamp(min=eps, max=1 - eps)
-    L_A = s / (s.sum(dim=-1, keepdim=True) + eps)
-
-    freq_tensor = torch.zeros((B, num_symbols, num_symbols), device=device)
-    for i, seq in enumerate(sequences):
-        for j in range(len(seq) - 1):
-            a, b = seq[j], seq[j + 1]
-            freq_tensor[i, a, b] += 1.0
-    rho = freq_tensor / (freq_tensor.sum(dim=(1, 2), keepdim=True) + eps)
-    fallback_bits = -torch.log2(rho.clamp(min=eps))
-
-    cost_bits = s * (-torch.log2(L_A)) + (1 - s) * fallback_bits
-    avg_cost_bits = torch.mean(cost_bits.view(B, -1), dim=1)  # per batch
-
-    rho_flat = L_A.view(B, -1).clamp(min=eps)
-    entropy = -torch.sum(rho_flat * torch.log2(rho_flat), dim=1)
-
-    rel = entropy + avg_cost_bits
-    return rel.mean()
-
-
-def entropic_relevance_diff_loss(sdfa_pred, sdfa_target, eps=1e-9):
-    B, S, _ = sdfa_pred.shape
-
-    s = sdfa_pred.clamp(min=eps, max=1 - eps)
-    L_A = s / (s.sum(dim=-1, keepdim=True) + eps)
-
-    rho = sdfa_target
-    fallback_bits = -torch.log2(rho.clamp(min=eps))
-
-    cost_bits = s * (-torch.log2(L_A)) + (1 - s) * fallback_bits
-    avg_cost_bits = torch.mean(cost_bits.view(B, -1), dim=1)  # per batch
-
-    rho_flat = L_A.view(B, -1).clamp(min=eps)
-    entropy = -torch.sum(rho_flat * torch.log2(rho_flat), dim=1)
-
-    rel = entropy + avg_cost_bits
-    return rel.mean()
 
 
 def train_model(model, le, daily_sequences, optimizer, max_len, num_epochs=10):
@@ -244,8 +229,6 @@ def train_model(model, le, daily_sequences, optimizer, max_len, num_epochs=10):
 
         print(f"Epoch {epoch+1}/{num_epochs} - Loss: {total_loss/len(daily_sequences):.4f}")
 
-
-
 def evaluate_model(model, le, daily_sequences, max_len):
     model.eval()
     total_loss = 0.0
@@ -276,7 +259,7 @@ def train_NAP_model(model, le, sequences, optimizer, max_len, er_loss, mix_lambd
     for epoch in tqdm(range(num_epochs), desc="Epoch Progress"):
         total_loss = 0.0
 
-        prefixes, suffixes, target_dfg_tensors = extract_prefix_suffix_pairs(sequences, le)
+        prefixes, suffixes, target_dfg_tensors = extract_prefix_suffix_pairs(sequences, le, length=max_len)
         train_dataset = EventDatasetTargets(prefixes, suffixes, target_dfg_tensors, True, pad_token=0)
         dataloader = DataLoader(train_dataset, batch_size=32, shuffle=False, collate_fn=collate_batch_w_nap_targets)
 
@@ -292,10 +275,10 @@ def train_NAP_model(model, le, sequences, optimizer, max_len, er_loss, mix_lambd
                 entropic_loss = entropic_relevance_diff_loss(sdfa_pred, sdfa_target)
             else:
                 logits = model(x,mask)
-            loss_nap = F.cross_entropy(logits, y)
+            loss_nap = F.cross_entropy(logits, y, ignore_index=0)
             
             if er_loss:
-                loss = loss_nap + mix_lambda * entropic_loss
+                loss = (1- mix_lambda) * loss_nap + mix_lambda * entropic_loss
             else:
                 loss = loss_nap
             loss.backward()
@@ -313,7 +296,7 @@ def evaluate_nap_model(model, le, sequences, max_len, er_loss):
     total_recall = 0.0
     total_f1 = 0.0
 
-    prefixes, suffixes, target_dfg_tensors = extract_prefix_suffix_pairs(sequences, le)
+    prefixes, suffixes, target_dfg_tensors = extract_prefix_suffix_pairs(sequences, le, length=max_len)
     test_dataset = EventDatasetTargets(prefixes, suffixes, target_dfg_tensors, True, pad_token=0)
     dataloader = DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=False, collate_fn=collate_batch_w_nap_targets)
 
@@ -366,30 +349,42 @@ def train_suffix_model(model, le, sequences, optimizer, max_len, er_loss, mix_la
 
         prefixes, suffixes, target_dfg_tensors = extract_prefix_suffix_pairs(sequences, le)
         train_dataset = EventDatasetTargets(prefixes, suffixes, target_dfg_tensors, False, pad_token=0)
-        dataloader = DataLoader(train_dataset, batch_size=32, shuffle=False, collate_fn=collate_batch_w_targets)
+        dataloader = DataLoader(train_dataset, batch_size=32, shuffle=False, collate_fn=lambda b: collate_batch_w_targets(b, sos_token=le.len()+1))
 
         batch_tqdm = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs} Progress", leave=False)
         
-        for x, mask, y, sdfa_target in batch_tqdm:  # sequences not needed here
-            x, mask, y, sdfa_target = x.to(device), mask.to(device), y.to(device), sdfa_target.to(device)
+        # for x, mask, y, sdfa_target in batch_tqdm:  # sequences not needed here
+        #     x, mask, y, sdfa_target = x.to(device), mask.to(device), y.to(device), sdfa_target.to(device)
+
+        #     optimizer.zero_grad()
+
+        for x, mask, y_in, y_out, sdfa_target in batch_tqdm:
+            x, mask = x.to(device), mask.to(device)
+            y_in, y_out = y_in.to(device), y_out.to(device)
+            sdfa_target = sdfa_target.to(device)
 
             optimizer.zero_grad()
-            sdfa_pred, suffix_logits = model(x, mask)
 
-            entropic_loss = entropic_relevance_diff_loss(sdfa_pred, sdfa_target)
+            # sdfa_pred, suffix_logits = model(x, mask, y_in)
+
+            if er_loss:
+                sdfa_pred, suffix_logits = model(x, mask, y_in)
+            else:
+                suffix_logits = model(x, mask)
+
+            if er_loss:
+                entropic_loss = entropic_relevance_diff_loss(sdfa_pred, sdfa_target)
 
             seq_len_pred = suffix_logits.size(1)
-            seq_len_target = y.size(1)
+            seq_len_target = y_out.size(1)
             min_len = min(seq_len_pred, seq_len_target)
 
-            loss_suffix = F.cross_entropy(
-                suffix_logits[:, :min_len, :].reshape(-1, suffix_logits.size(-1)),
-                y[:, :min_len].reshape(-1),
-                ignore_index=0,
+            loss_suffix = F.cross_entropy(suffix_logits[:, :min_len, :].reshape(-1, suffix_logits.size(-1)),
+                y_out[:, :min_len].reshape(-1), ignore_index=0,
             )
             
             if er_loss:
-                loss = loss_suffix + mix_lambda * entropic_loss
+                loss = (1-mix_lambda) * loss_suffix + mix_lambda * entropic_loss
             else:
                 loss = loss_suffix
             loss.backward()
@@ -406,26 +401,37 @@ def evaluate_suffix_model(model, le, sequences, max_len, er_loss):
     total_dl_distance = 0.0
 
     prefixes, suffixes, target_dfg_tensors = extract_prefix_suffix_pairs(sequences, le)
-    test_dataset = EventDatasetTargets(prefixes, suffixes, target_dfg_tensors, pad_token=0)
-    dataloader = DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=False, collate_fn=collate_batch_w_targets)
+    test_dataset = EventDatasetTargets(prefixes, suffixes, target_dfg_tensors, False, pad_token=0)
+    dataloader = DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=False, collate_fn=lambda b: collate_batch_w_targets(b, sos_token=le.len()+1))
 
     with torch.no_grad():
-        for x, mask, y, sdfa_target in dataloader:
-            x, mask, y, sdfa_target = x.to(device), mask.to(device), y.to(device), sdfa_target.to(device)
+        # for x, mask, y, sdfa_target in dataloader:
+        #     x, mask, y, sdfa_target = x.to(device), mask.to(device), y.to(device), sdfa_target.to(device)
 
-            sdfa_pred, suffix_logits = model(x, mask)
+        #     if er_loss:
+        #         sdfa_pred, suffix_logits = model(x, mask)
+        #     else:
+        #         suffix_logits = model(x, mask)
+        for x, mask, y_in, y_out, sdfa_target in dataloader:
+            x, mask = x.to(device), mask.to(device)
+            y_in, y_out = y_in.to(device), y_out.to(device)
+            sdfa_target = sdfa_target.to(device)
 
-            entropic_loss = entropic_relevance_diff_loss(sdfa_pred, sdfa_target)
+            if er_loss:
+                sdfa_pred, suffix_logits = model(x, mask, y_in)
+            else:
+                suffix_logits = model(x, mask)
+
+            if er_loss:
+                entropic_loss = entropic_relevance_diff_loss(sdfa_pred, sdfa_target)
 
             seq_len_pred = suffix_logits.size(1)
-            seq_len_target = y.size(1)
+            seq_len_target = y_out.size(1)
             min_len = min(seq_len_pred, seq_len_target)
             suffix_pred = suffix_logits.argmax(dim=-1)
 
-            loss_suffix = F.cross_entropy(
-                suffix_logits[:, :min_len, :].reshape(-1, suffix_logits.size(-1)),
-                y[:, :min_len].reshape(-1),
-                ignore_index=0,
+            loss_suffix = F.cross_entropy(suffix_logits[:, :min_len, :].reshape(-1, suffix_logits.size(-1)),
+                y_out[:, :min_len].reshape(-1), ignore_index=0,
             )
             
             if er_loss:
@@ -434,7 +440,7 @@ def evaluate_suffix_model(model, le, sequences, max_len, er_loss):
                 loss = loss_suffix
             total_loss += loss.item()
 
-            batch_distance = compute_avg_damerau_levenshtein(suffix_pred, y)
+            batch_distance = compute_avg_damerau_levenshtein(suffix_pred, y_out)
             total_dl_distance += batch_distance
 
     avg_dl_distance = total_dl_distance / len(dataloader)
