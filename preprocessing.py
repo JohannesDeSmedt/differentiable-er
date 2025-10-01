@@ -49,75 +49,6 @@ class EventDatasetTargets(Dataset):
             return seq, tgt, sdfa
     
 
-def collate_batch(batch):
-    batch = [b.tolist() if isinstance(b, torch.Tensor) else b for b in batch]
-    max_len = max(len(seq) for seq in batch)
-    
-    padded = []
-    mask = []
-    for seq in batch:
-        padded_seq = seq + [0] * (max_len - len(seq))
-        padded.append(padded_seq)
-        mask.append([1] * len(seq) + [0] * (max_len - len(seq)))
-
-    x = torch.tensor(padded, dtype=torch.long)
-    mask = torch.tensor(mask, dtype=torch.bool)
-    return x, mask, [torch.tensor(seq, dtype=torch.long) for seq in batch]
-
-
-def collate_batch_w_nap_targets(batch, pad_token=0):
-    xs, y, sdfas = zip(*batch)  # unpack input/target pairs
-
-    max_len_x = max(len(seq) for seq in xs)
-    padded_x, mask = [], []
-
-    for seq_x in xs:
-        # Pad input
-        padded_seq_x = seq_x + [pad_token] * (max_len_x - len(seq_x))
-        padded_x.append(padded_seq_x)
-        mask.append([1] * len(seq_x) + [0] * (max_len_x - len(seq_x)))
-
-    x = torch.tensor(padded_x, dtype=torch.long)
-    mask = torch.tensor(mask, dtype=torch.bool)
-    y = torch.tensor(y, dtype=torch.long)
-    sdfa_targets = torch.stack(sdfas, dim=0)
-
-    return x, mask, y, sdfa_targets
-
-
-def collate_batch_w_targets(batch, sos_token=1000, pad_token=0):
-    xs, ys, sdfas = zip(*batch)  # unpack input/target pairs
-
-    max_len_x = max(len(seq) for seq in xs)
-    max_len_y = max(len(seq) for seq in ys)
-
-    padded_x, mask = [], []
-    # padded_y = []
-    padded_y_out, padded_y_in = [], []
-
-    for seq_x, seq_y in zip(xs, ys):
-        # Pad input
-        padded_seq_x = seq_x + [pad_token] * (max_len_x - len(seq_x))
-        padded_x.append(padded_seq_x)
-        mask.append([1] * len(seq_x) + [0] * (max_len_x - len(seq_x)))
-
-        # Pad target
-        padded_seq_y = seq_y + [pad_token] * (max_len_y - len(seq_y))
-        padded_y_out.append(padded_seq_y)
-
-        shifted = [sos_token] + padded_seq_y[:-1]
-        padded_y_in.append(shifted)
-        # padded_y.append(padded_seq_y)
-
-    x = torch.tensor(padded_x, dtype=torch.long)
-    mask = torch.tensor(mask, dtype=torch.bool)
-    # y = torch.tensor(padded_y, dtype=torch.long)
-    y_in = torch.tensor(padded_y_in, dtype=torch.long)     # decoder input
-    y_out = torch.tensor(padded_y_out, dtype=torch.long)   # decoder target
-    sdfa_targets = torch.stack(sdfas, dim=0)
-
-    return x, mask, y_in, y_out, sdfa_targets
-
 def encode_activities(df, le):
     # indien niet in test set -> label -1
     known = set(le.classes_)
@@ -133,13 +64,15 @@ def extract_prefix_suffix_pairs(df, le, length=0, pad_token=0):
 
     cases = df.groupby("case_id")
     input_sequences, target_sequences, target_dfgs = [], [], []
-    paired_batches = []
 
     for _, case in cases:
         activities = le.transform(case["activity"].tolist()).tolist()
         n = len(activities)
 
         for i in range(1, n):  # prefix ends at i-1, target starts at i
+            if len(activities[:i]) < 10:
+                continue
+
             if length > 0:  
                 prefix = activities[max(0,i-length):i]     
             else:
@@ -273,15 +206,29 @@ def sequence_to_sdfa_tensor(sequence, num_symbols, pad_token=0, eps=1e-9):
 
 
 class PaddedLabelEncoder:
-    def __init__(self):
+    def __init__(self, unk_token='UNK'):
         self.le = LabelEncoder()
+        self.unk_token = unk_token
         
     def fit(self, labels):
         self.le.fit(labels)
         return self
     
-    def transform(self, labels):
-        return self.le.transform(labels) + 1   # shift
+    def transform(self, labels):        
+        labels = np.array(labels, dtype=str)
+        known_classes = set(self.le.classes_)
+
+        encoded = []
+        for lbl in labels:
+            if lbl in known_classes:
+                encoded.append(self.le.transform([lbl])[0] + 1)
+            else:
+                # unseen → last index (len(classes_) + 1, since +1 shift is used)
+                encoded.append(len(self.le.classes_) + 1)
+        return np.array(encoded)
+    
+    # def transform(self, labels):
+    #     return self.le.transform(labels) + 1   # shift
     
     def fit_transform(self, labels):
         return self.le.fit_transform(labels) + 1
@@ -290,8 +237,13 @@ class PaddedLabelEncoder:
         return self.le.inverse_transform(encoded - 1)  # unshift
     
     def len(self):
-        return len(self.le.classes_) 
+        return len(self.le.classes_) + 1
     
     @property
     def classes_(self):
-        return self.le.classes_
+        # Insert both PAD and UNK into vocab for clarity
+        return np.insert(self.le.classes_, [len(self.le.classes_)], [self.unk_token])
+
+    # @property
+    # def classes_(self):
+    #     return self.le.classes_

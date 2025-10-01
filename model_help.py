@@ -2,7 +2,49 @@ import torch
 import math
 
 import torch.nn as nn
+import numpy as np
 from torch.nn import functional as F
+
+device = torch.device("cpu" if torch.backends.mps.is_available() else "cpu")
+print(f"Using device: {device}")
+
+class EventTransformer(nn.Module):
+    def __init__(self, vocab_size, embedding=None, pos_encoder=None, d_model=128, nhead=4, num_layers=2, dropout=0.1):
+        super().__init__()
+        if embedding is None:
+            self.embedding = nn.Embedding(vocab_size + 1, d_model, padding_idx=0)
+        else:
+            self.embedding = embedding
+        if pos_encoder is None:
+            self.pos_encoder = PositionalEncoding(d_model, dropout)
+        else:
+            self.pos_encoder = pos_encoder
+
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dropout=dropout, batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        self.d_model = d_model
+
+    def forward(self, x, mask):
+        embedded = self.embedding(x) * (self.d_model ** 0.5)
+        embedded = self.pos_encoder(embedded)
+        src_key_padding_mask = ~mask.bool()
+        output = self.transformer_encoder(embedded, src_key_padding_mask=src_key_padding_mask)
+        return output
+    
+
+class SDFAProjector(nn.Module):
+    def __init__(self, d_model, sdfa_shape):
+        super().__init__()
+        self.proj = nn.Linear(d_model, int(np.prod(sdfa_shape)))
+        self.sdfa_shape = sdfa_shape
+
+    def forward(self, encoded):
+        pooled = encoded.mean(dim=1)
+        out = self.proj(pooled)
+        soft_tensor = torch.sigmoid(out).view(-1, *self.sdfa_shape)
+        return soft_tensor
+
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=500):
