@@ -56,11 +56,17 @@ def encode_activities(df, le):
     df["activity_encoded"] = df["activity"].apply(lambda x: le.transform([x])[0] if x in known else -1)
     return df
 
+def encode_activities_with_dict(df, my_dict):
+    # indien niet in test set -> label -1
+    df = df.copy()
+    df["concept:name"] = df["concept:name"].apply(lambda x: my_dict[x] if x in my_dict.keys() else 1)
+    return df
+
 
 def extract_prefix_suffix_pairs(df, le, length=0, pad_token=0):
     from collections import defaultdict
 
-    df['time:timestamp'] = pd.to_datetime(df['time:timestamp'])
+    df['time:timestamp'] = pd.to_datetime(df['time:timestamp'],format='mixed')
 
     cases = df.groupby("case_id")
     input_sequences, target_sequences, target_dfgs = [], [], []
@@ -70,8 +76,8 @@ def extract_prefix_suffix_pairs(df, le, length=0, pad_token=0):
         n = len(activities)
 
         for i in range(1, n):  # prefix ends at i-1, target starts at i
-            if len(activities[:i]) < 10:
-                continue
+            # if len(activities[:i]) < 10:
+                # continue
 
             if length > 0:  
                 prefix = activities[max(0,i-length):i]     

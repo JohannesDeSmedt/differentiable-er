@@ -16,7 +16,7 @@ class EventTransformer(nn.Module):
         else:
             self.embedding = embedding
         if pos_encoder is None:
-            self.pos_encoder = PositionalEncoding(d_model, dropout)
+            self.pos_encoder = PositionalEncoding(8, dropout)
         else:
             self.pos_encoder = pos_encoder
 
@@ -26,8 +26,9 @@ class EventTransformer(nn.Module):
         self.d_model = d_model
 
     def forward(self, x, mask):
-        embedded = self.embedding(x) * (self.d_model ** 0.5)
+        embedded = self.embedding(x) * (self.embedding.embedding_dim ** 0.5)
         embedded = self.pos_encoder(embedded)
+
         src_key_padding_mask = ~mask.bool()
         output = self.transformer_encoder(embedded, src_key_padding_mask=src_key_padding_mask)
         return output

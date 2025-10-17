@@ -80,7 +80,7 @@ class NAP_model(nn.Module):
         return logits
     
 
-def train_NAP_model(model, le, sequences, optimizer, max_len, er_loss, mix_lambda, device, num_epochs=10):
+def train_NAP_model(model, le, sequences, optimizer, max_len, er_loss, mix_lambda, device, num_epochs=10, batch_size=128):
     # model = model.to(device)
     # model.train()
 
@@ -92,7 +92,7 @@ def train_NAP_model(model, le, sequences, optimizer, max_len, er_loss, mix_lambd
 
         prefixes, suffixes, target_dfg_tensors = extract_prefix_suffix_pairs(sequences, le, length=max_len)
         train_dataset = EventDatasetTargets(prefixes, suffixes, target_dfg_tensors, True, pad_token=0)
-        dataloader = DataLoader(train_dataset, batch_size=32, shuffle=False, collate_fn=collate_batch_w_nap_targets)
+        dataloader = DataLoader(train_dataset, batch_size=128, shuffle=False, collate_fn=collate_batch_w_nap_targets)
 
         batch_tqdm = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs} Progress", leave=False)
         
