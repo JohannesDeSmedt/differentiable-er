@@ -5,6 +5,7 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
+import time
 import os 
 
 from sklearn.preprocessing import LabelEncoder
@@ -72,7 +73,7 @@ def prepare_data(df: pd.DataFrame, unbiased_split_params: dict) -> Tuple[pd.Data
     valid_cases = case_lengths[case_lengths <= max_case_len].index
     df = df[df["case:concept:name"].isin(valid_cases)]
 
-    print('Max case length (99th percentile):', max_case_len)
+    print(f'Max case length ({quantile} percentile):', max_case_len)
 
     train = train.rename(columns={"case:concept:name": "case_id", "concept:name": "activity"})
     test = test.rename(columns={"case:concept:name": "case_id", "concept:name": "activity"})
@@ -81,6 +82,7 @@ def prepare_data(df: pd.DataFrame, unbiased_split_params: dict) -> Tuple[pd.Data
 
     # my_little_dict = {label: int(le.transform([label])[0]) for label in le.classes_}
     # print('Activity to index mapping:', my_little_dict)
+
 
     xiaomeng_dict = {'SOC': 2, 'EOC': 3, 'A_SUBMITTED': 4,
                       'A_PARTLYSUBMITTED': 5, 'A_PREACCEPTED': 6, 
@@ -155,28 +157,28 @@ def prepare_data(df: pd.DataFrame, unbiased_split_params: dict) -> Tuple[pd.Data
 device = torch.device("cpu" if torch.backends.mps.is_available() else "cpu")
 print(f"Using device: {device}")
 
-log = EVENT_LOGS['BPI20PrepaidTravelCosts']()
-log_name = 'BPI20PrepaidTravelCosts'
+log = EVENT_LOGS['BPI12']()
+log_name = 'BPI12'
 
 suffix_prediction = True
-quantile = 0.99
+quantile = 0.95
 
 train_loader, test_loader, max_case_len = prepare_data(log.dataframe, log.unbiased_split_params) 
 
 vocab_size = len(le.classes_) 
 max_len = 5  
-write = True
+write = False
 no_epochs = 10
 seed = 56
 
 torch.manual_seed(seed)
 np.random.seed(seed)
 
-for seed in [56, 8, 15]:#, 76, 23]:
+for seed in [56, 8, 15, 76, 23]:
     torch.manual_seed(seed)
     np.random.seed(seed)
     for batch_size in [16, 32]:#, 256]:
-        for no_epochs in [20]:
+        for no_epochs in [10]:
             for er_loss_use in [False, True]:#, False]:
                 for d_model_p in [16, 32, 64]:
                     if suffix_prediction:

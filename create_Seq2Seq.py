@@ -26,22 +26,6 @@ import torch.nn.functional as F
 class Encoder(nn.Module):
 
     def __init__(self, input_size, hidden_size, num_layers, dropout):
-        """
-
-        Parameters
-        ----------
-        input_size: int
-            Number of input features
-        hidden_size: int
-            Number of hidden units in LSTM
-        num_layers: int
-            Number of stacked LSTM layers
-        dropout: float
-            Dropout probability to drop out the outputs of each LSTM layer 
-            except the last layer.
-
-        """
-
         super(Encoder, self).__init__()
         self.lstm = nn.LSTM(input_size=input_size, 
                            hidden_size=hidden_size,
@@ -50,48 +34,12 @@ class Encoder(nn.Module):
                            dropout=dropout)
                 
     def forward(self, prefix):
-        """
-
-        Parameters
-        ----------
-        prefix: tensor
-            Trace prefix or log prefix
-            shape: (batch_size, prefix_len, num_features)
-
-        Returns
-        -------
-        enc_states: tensor
-            shape: (batch_size, prefix_len, hidden_size)
-        hidden: tensor
-            shape: (num_layers, batch_size, hidden_size)
-        cell: tensor
-            shape: (num_layers, batch_size, hidden_size)
-
-        """
-        
         enc_states, (hidden, cell) = self.lstm(prefix)
 
         return enc_states, hidden, cell
 
 class Decoder(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, num_layers, dropout):
-        """
-
-        Parameters
-        ----------
-        input_size: int
-            Number of input features
-        hidden_size: int
-            Number of hidden units in LSTM.
-        output_size: int
-            Number of features for output.
-        num_layers: int
-            Number of stacked LSTM layers
-        dropout: float
-            Dropout probability to drop out the outputs of each LSTM layer 
-            except the last layer.
-
-        """        
         super(Decoder, self).__init__()
 
         self.lstm = nn.LSTM(input_size=input_size , 
@@ -102,30 +50,6 @@ class Decoder(nn.Module):
         self.fc = nn.Linear(hidden_size, output_size)
         
     def forward(self, suffix_vector, hidden, cell):
-
-        """
-        Parameters
-        ----------
-        suffix_vector: tensor
-            Feature vector representing an event in the suffix
-            shape: (batch_size, num_features)
-        hidden: tensor
-            Hidden state
-            shape: (num_layers, batch_size, hidden_size)
-        cell: tensor
-            Cell state
-            shape: (num_layers, batch_size, hidden_size)
-
-        Returns
-        -------
-        prediction: tensor
-            shape: (batch_size, output_size)
-        hidden: tensor
-            shape: (num_layers, batch_size, hidden_size)
-        cell: tensor
-            shape: (num_layers, batch_size, hidden_size)
-        """
-         
         suffix_vector = suffix_vector.unsqueeze(1) # shape: (batch_size, 1, num_features) 
         
         outputs, (hidden, cell) = self.lstm(suffix_vector, (hidden, cell)) # shape: (batch_size, 1, hidden_size)

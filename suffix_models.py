@@ -8,6 +8,7 @@ from preprocessing import extract_prefix_suffix_pairs
 from torch.utils.data import DataLoader
 from torch.nn import functional as F
 import editdistance
+import time
 
 from create_Seq2Seq import Encoder as LSTM_encoder
 from create_Seq2Seq import Decoder as LSTM_decoder
@@ -57,7 +58,7 @@ def collate_batch_w_targets(batch, max_case_len, sos_token=1000, pad_token=0):
     xs, ys, sdfas = zip(*batch)  # unpack input/target pairs
 
     max_len_x = max(len(seq) for seq in xs)
-    max_len_y = max_case_len #max(len(seq) for seq in ys)
+    max_len_y = max(len(seq) for seq in ys)
 
     padded_x, mask = [], []
     # padded_y = []
@@ -71,7 +72,7 @@ def collate_batch_w_targets(batch, max_case_len, sos_token=1000, pad_token=0):
 
         # Pad target
         padded_seq_y = seq_y + [pad_token] * (max_len_y - len(seq_y))
-        padded_seq_y = padded_seq_y[:max_len_y]  # truncate if necessary
+        # padded_seq_y = padded_seq_y[:max_len_y]  # truncate if necessary
         padded_y_out.append(padded_seq_y)
 
         shifted = [sos_token] + padded_seq_y[:-1]
@@ -335,7 +336,10 @@ def evaluate_suffix_model(model, le, sequences, max_case_len, er_loss, device):
             batch_size = x.size(0)
             max_len = y_out.size(1)
             sos_token = y_in[0, 0].item()   # your SOS value
-            eoc_index = le.transform(["EOS"])[0]
+            eoc_index = le.transform(["EOC"])[0]
+            # if dl < 5:
+            #     print('Max len for generation:', max_len)
+            #     print('SOS token:', sos_token, 'EOC token:', eoc_index)
 
             generated = torch.full((batch_size, 1), sos_token, dtype=torch.long, device=device)
             for t in range(1, max_len):
@@ -350,6 +354,9 @@ def evaluate_suffix_model(model, le, sequences, max_case_len, er_loss, device):
                     next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
                     generated = torch.cat([generated, next_token], dim=1)
 
+                # if dl < 5:
+                #     print('Next token at step', t, ':', next_token.squeeze().cpu().tolist())
+                #     print('Generated so far:', generated.squeeze().cpu().tolist())
                 finished = (generated[:, -1] == eoc_index)
                 next_token[finished] = eoc_index
                 generated = torch.cat([generated, next_token], dim=1)
@@ -359,7 +366,8 @@ def evaluate_suffix_model(model, le, sequences, max_case_len, er_loss, device):
 
             for i in range(batch_size):
                 pred_seq = []
-                for p in generated[i].tolist():
+                # print('Generated:', generated[i].tolist(), generated[i][1:].tolist())
+                for p in generated[i][1:].tolist():
                     pred_seq.append(p)
                     if p == eoc_index:
                         break
@@ -374,13 +382,16 @@ def evaluate_suffix_model(model, le, sequences, max_case_len, er_loss, device):
                 if max_len == 0:  # edge case
                     continue
                 distance = damerau_levenshtein(pred_seq, target_seq)
+                # if dl < 5:
+                #     print(f"Sample {i} - DL distance: {distance} (Pred: {pred_seq}, Target: {target_seq}), Max len: {max_len}")
                 total_dl_distance += distance / max_len
 
-            if dl < 5:  # only print first batch to keep output readable
-                print("\n=== Evaluation Sample ===")
-                print("Prefix (x):", x[0].tolist())
-                print("Target Suffix (y_out):", y_out[0].tolist())
-                print("Predicted Suffix:", generated[0].tolist())
+            # if dl < 5:  # only print first batch to keep output readable
+            #     print("\n=== Evaluation Sample ===")
+            #     print("Prefix (x):", x[0].tolist())
+            #     print("Target Suffix (y_out):", y_out[0].tolist())
+            #     print("Predicted Suffix:", generated[0].tolist())
+            time.sleep(10)
 
     avg_dl_distance = total_dl_distance / len(sequences)
     print(f"Avg Damerau-Levenshtein distance on test set: {avg_dl_distance:.4f}")

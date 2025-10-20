@@ -73,6 +73,7 @@ def extract_prefix_suffix_pairs(df, le, length=0, pad_token=0):
 
     for _, case in cases:
         activities = le.transform(case["activity"].tolist()).tolist()
+        # print('Activities encoded:', activities)
         n = len(activities)
 
         for i in range(1, n):  # prefix ends at i-1, target starts at i
@@ -91,6 +92,10 @@ def extract_prefix_suffix_pairs(df, le, length=0, pad_token=0):
                 suffix = [suffix]
             input_sequences.append(prefix)
             target_sequences.append(suffix)
+            # print(prefix)
+            # print(suffix)
+        # print(prefix)
+        # print(suffix)
 
     dfgs = sequences_to_sdfa_tensor(target_sequences, num_symbols=len(le.classes_))
     target_dfgs = [dfgs for _ in range(len(input_sequences))]
