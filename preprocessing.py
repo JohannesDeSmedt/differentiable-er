@@ -102,7 +102,7 @@ def extract_prefix_suffix_pairs(df, le, length=0, pad_token=0):
 
     print(f"Extracted {len(input_sequences)} prefix/suffix pairs")
     print(f"Example input: {input_sequences[0:2]}")
-    print(f"Example target: {target_sequences[1:3]}")
+    print(f"Example target: {target_sequences[0:2]}")
 
     return input_sequences, target_sequences, target_dfgs
 

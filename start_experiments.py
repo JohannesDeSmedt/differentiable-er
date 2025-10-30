@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import time
 import os 
+import sys
 
 from sklearn.preprocessing import LabelEncoder
 from skpm.event_logs import (
@@ -50,7 +51,7 @@ EVENT_LOGS = {
     "BPI19": BPI19,
     # "BPI19": BPI19,
     "BPI20PrepaidTravelCosts": BPI20PrepaidTravelCosts,
-    # "BPI20TravelPermitData": BPI20TravelPermitData,
+    "BPI20TravelPermitData": BPI20TravelPermitData,
     "BPI20RequestForPayment": BPI20RequestForPayment,
 }
 
@@ -84,18 +85,6 @@ def prepare_data(df: pd.DataFrame, unbiased_split_params: dict) -> Tuple[pd.Data
     # print('Activity to index mapping:', my_little_dict)
 
 
-    xiaomeng_dict = {'SOC': 2, 'EOC': 3, 'A_SUBMITTED': 4,
-                      'A_PARTLYSUBMITTED': 5, 'A_PREACCEPTED': 6, 
-                      'W_Completeren aanvraag': 7, 'A_DECLINED': 8, 
-                      'W_Afhandelen leads': 9, 'A_ACCEPTED': 10, 'O_SELECTED': 11,
-                      'A_FINALIZED': 12, 'O_CREATED': 13, 'O_SENT': 14, 
-                      'W_Nabellen offertes': 15, 'O_CANCELLED': 16, 'A_CANCELLED': 17, 
-                      'W_Beoordelen fraude': 18, 'O_SENT_BACK': 19, 'W_Valideren aanvraag': 20, 
-                      'W_Nabellen incomplete dossiers': 21, 'O_ACCEPTED': 22, 'A_REGISTERED': 23, 
-                      'A_APPROVED': 24, 'A_ACTIVATED': 25, 'O_DECLINED': 26, 'W_Wijzigen contractgegevens': 27}
-    reverse_dict = {v: k for k, v in xiaomeng_dict.items()}
-
-
     df_train = encode_activities(train, le)
     # df_train = df_train.sample(10000)
     df_test = encode_activities(test, le)  
@@ -122,7 +111,6 @@ def prepare_data(df: pd.DataFrame, unbiased_split_params: dict) -> Tuple[pd.Data
     # df_test.to_csv('df_test_joh.csv', index=True)
 
 
-
     # load other dataset
 
     # train = pd.read_csv('df_before_split.csv')
@@ -145,92 +133,102 @@ def prepare_data(df: pd.DataFrame, unbiased_split_params: dict) -> Tuple[pd.Data
 
     # print(train.head())
 
-    # exit(0)
-
-    # if suffix_prediction or nap_prediction:
     return df_train, df_test, max_case_len
-    # else:
-    #     train_seqs = extract_daily_prefixes_with_shifted_targets(df_train, prefix_len, le)
-    #     test_seqs = extract_daily_prefixes_with_shifted_targets(df_test, prefix_len, le)
-    #     return train_seqs, test_seqs
-        
-device = torch.device("cpu" if torch.backends.mps.is_available() else "cpu")
-print(f"Using device: {device}")
 
-log = EVENT_LOGS['BPI12']()
-log_name = 'BPI12'
+        
+# arguments = sys.argv
+# dataset = arguments[1]
+# if arguments[2].lower() == 'true':
+#     suffix_prediction = True
+# else:
+#     suffix_prediction = False
+# quantile = float(arguments[3])
 
 suffix_prediction = True
-quantile = 0.95
+quantile = 0.8
 
-train_loader, test_loader, max_case_len = prepare_data(log.dataframe, log.unbiased_split_params) 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
-vocab_size = len(le.classes_) 
-max_len = 5  
-write = False
-no_epochs = 10
-seed = 56
+for dataset in ["BPI19"]: #["BPI20PrepaidTravelCosts", "BPI20RequestForPayment", "BPI20TravelPermitData"]:
 
-torch.manual_seed(seed)
-np.random.seed(seed)
+    for suffix_prediction in [suffix_prediction]:
+        log = EVENT_LOGS[dataset]()
+        log_name = dataset
 
-for seed in [56, 8, 15, 76, 23]:
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    for batch_size in [16, 32]:#, 256]:
-        for no_epochs in [10]:
-            for er_loss_use in [False, True]:#, False]:
-                for d_model_p in [16, 32, 64]:
-                    if suffix_prediction:
-                        if er_loss_use:
-                            for mix_lambda in [0.1, 0.2, 0.5]:
-                                model = SDFA_suffix_model(vocab_size, d_model=d_model_p, sdfa_shape=(vocab_size, vocab_size)).to(device)
-                                optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+        train_loader, test_loader, max_case_len = prepare_data(log.dataframe, log.unbiased_split_params) 
 
-                                train_suffix_model(model, le, train_loader, optimizer, max_case_len, er_loss_use, mix_lambda, device, num_epochs=no_epochs)
-                                er_loss, dl_distance = evaluate_suffix_model(model, le, test_loader, max_case_len, er_loss_use, device)
-                                if write:
-                                    write_results_to_csv(f'results_suffix_prediction_{log_name}.csv',
-                                        params={'seed': seed, 'quantile':quantile, 'model': model.__class__.__name__, 'lambda': mix_lambda, 'd_model': d_model_p, 'er_loss': er_loss_use, 'no_epochs': no_epochs},
-                                        results={'avg_dl_distance': dl_distance}
-                                    )
-                        else:
-                            mix_lambda = 0
-                            model = suffix_model(vocab_size, d_model=d_model_p).to(device)
-                            optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-                            train_suffix_model(model, le, train_loader, optimizer, max_case_len, er_loss_use, mix_lambda, device, num_epochs=no_epochs)
-                            er_loss, dl_distance = evaluate_suffix_model(model, le, test_loader, max_case_len, er_loss_use, device)
-                            if write:
-                                write_results_to_csv(f'results_suffix_prediction_{log_name}.csv',
-                                        params={'seed': seed, 'quantile':quantile, 'model': model.__class__.__name__, 'lambda': mix_lambda, 'd_model': d_model_p, 'er_loss': er_loss_use, 'no_epochs': no_epochs},
-                                        results={'avg_dl_distance': dl_distance}
-                                )
-                    else:
-                        for max_len in [10, 20]:
-                            if er_loss_use:
-                                for mix_lambda in [0.1, 0.2, 0.5]:
-                                    model = SDFA_NAP_model(vocab_size, d_model=d_model_p, sdfa_shape=(vocab_size, vocab_size)).to(device)
-                                    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-                                    comp_time = train_NAP_model(model, le, train_loader, optimizer, max_len, er_loss_use, mix_lambda, device, num_epochs=no_epochs, batch_size=batch_size)
-                                    er_loss, accuracy, precision, recall, f1 = evaluate_nap_model(model, le, test_loader, max_len, er_loss_use, device)
-                                    if write:
-                                        write_results_to_csv(f'results_nap_prediction_{log_name}.csv',
-                                        params={'seed': seed, 'quantile':quantile, 'model': model.__class__.__name__, 'lambda': mix_lambda, 
-                                                'd_model': d_model_p, 'er_loss': er_loss_use, 'batch_size': batch_size, 'no_epochs': no_epochs, 'max_len': max_len},
-                                        results={'recall': recall, 'precision': precision, 'f1': f1, 'accuracy': accuracy, 'time': comp_time}
-                                        )
-                            else:
-                                mix_lambda = 0
-                                model = NAP_model(vocab_size, d_model=d_model_p, sdfa_shape=(vocab_size, vocab_size)).to(device)
-                                optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-                                comp_time = train_NAP_model(model, le, train_loader, optimizer, max_len, er_loss_use, mix_lambda, device, num_epochs=no_epochs, batch_size=batch_size)
-                                er_loss, accuracy, precision, recall, f1  = evaluate_nap_model(model, le, test_loader, max_len, er_loss_use, device)
-                                if write:
-                                    write_results_to_csv(f'results_nap_prediction_{log_name}.csv',
-                                        params={'seed': seed, 'quantile':quantile, 'model': model.__class__.__name__, 'lambda': mix_lambda, 'd_model': d_model_p, 'er_loss': er_loss_use,
-                                                 'batch_size': batch_size,  'no_epochs': no_epochs, 'max_len': max_len},
-                                        results={'recall': recall, 'precision': precision, 'f1': f1, 'accuracy': accuracy, 'time': comp_time}
-                                    )
+        vocab_size = len(le.classes_) 
+        max_len = 5  
+        write = True
+        no_epochs = 2
+        seed = 56
+
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+
+        for seed in [56, 8, 15, 76, 23]:
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            for local in [False, True]:
+                for bs in [16, 32]:#, 256]:
+                    for no_epochs in [10]:
+                        for er_loss_use in [False, True]:#, False]:
+                            for d_model_p in [16, 32, 64]:
+                                if suffix_prediction:
+                                    if er_loss_use:
+                                        for mix_lambda in [0.1, 0.2, 0.5]:
+                                            model = SDFA_suffix_model(vocab_size, d_model=d_model_p, sdfa_shape=(vocab_size, vocab_size)).to(device)
+                                            optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+
+                                            comp_time = train_suffix_model(model, le, train_loader, optimizer, max_case_len, er_loss_use, mix_lambda, device, local=local, batch_size=bs, num_epochs=no_epochs)
+                                            er_loss, dl_distance = evaluate_suffix_model(model, le, test_loader, max_case_len, er_loss_use, device, local, bs)
+                                            if write:
+                                                write_results_to_csv(f'results_suffix_prediction_{log_name}.csv',
+                                                    params={'seed': seed, 'local':local, 'quantile':quantile, 'model': model.__class__.__name__, 'lambda': mix_lambda, 'd_model': d_model_p, 'er_loss': er_loss_use, 'no_epochs': no_epochs},
+                                                    results={'avg_dl_distance': dl_distance, 'time': comp_time}
+                                                )
+                                    else:
+                                        if local:
+                                            continue
+                                        mix_lambda = 0
+                                        model = suffix_model(vocab_size, d_model=d_model_p).to(device)
+                                        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+                                        comp_time = train_suffix_model(model, le, train_loader, optimizer, max_case_len, er_loss_use, mix_lambda, device, local=local, batch_size=bs, num_epochs=no_epochs)
+                                        er_loss, dl_distance = evaluate_suffix_model(model, le, test_loader, max_case_len, er_loss_use, device, local, bs)
+                                        if write:
+                                            write_results_to_csv(f'results_suffix_prediction_{log_name}.csv',
+                                                    params={'seed': seed,  'local':local, 'quantile':quantile, 'model': model.__class__.__name__, 'lambda': mix_lambda, 'd_model': d_model_p, 'er_loss': er_loss_use, 'no_epochs': no_epochs},
+                                                    results={'avg_dl_distance': dl_distance, 'time': comp_time}
+                                            )
+                                else:
+                                    for max_len in [10, 20]:
+                                        if er_loss_use:
+                                            for mix_lambda in [0.1, 0.2, 0.5]:
+                                                model = SDFA_NAP_model(vocab_size, d_model=d_model_p, sdfa_shape=(vocab_size, vocab_size)).to(device)
+                                                optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+                                                comp_time = train_NAP_model(model, le, train_loader, optimizer, max_len, er_loss_use, mix_lambda, device, local=local, num_epochs=no_epochs, batch_size=bs)
+                                                er_loss, accuracy, precision, recall, f1 = evaluate_nap_model(model, le, test_loader, max_len, er_loss_use, device, local)
+                                                if write:
+                                                    write_results_to_csv(f'results_nap_prediction_{log_name}.csv',
+                                                    params={'seed': seed,  'local':local, 'quantile':quantile, 'model': model.__class__.__name__, 'lambda': mix_lambda, 
+                                                            'd_model': d_model_p, 'er_loss': er_loss_use, 'batch_size': bs, 'no_epochs': no_epochs, 'max_len': max_len},
+                                                    results={'recall': recall, 'precision': precision, 'f1': f1, 'accuracy': accuracy, 'time': comp_time}
+                                                    )
+                                        else:
+                                            if local:
+                                                continue
+                                            mix_lambda = 0
+                                            model = NAP_model(vocab_size, d_model=d_model_p, sdfa_shape=(vocab_size, vocab_size)).to(device)
+                                            optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+                                            comp_time = train_NAP_model(model, le, train_loader, optimizer, max_len, er_loss_use, mix_lambda, device, local=local, num_epochs=no_epochs, batch_size=bs)
+                                            er_loss, accuracy, precision, recall, f1  = evaluate_nap_model(model, le, test_loader, max_len, er_loss_use, device, local)
+                                            if write:
+                                                write_results_to_csv(f'results_nap_prediction_{log_name}.csv',
+                                                    params={'seed': seed, 'local':local, 'quantile':quantile, 'model': model.__class__.__name__, 'lambda': mix_lambda, 'd_model': d_model_p, 'er_loss': er_loss_use,
+                                                            'batch_size': bs,  'no_epochs': no_epochs, 'max_len': max_len},
+                                                    results={'recall': recall, 'precision': precision, 'f1': f1, 'accuracy': accuracy, 'time': comp_time}
+                                            )
 
 
 

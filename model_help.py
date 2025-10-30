@@ -16,7 +16,7 @@ class EventTransformer(nn.Module):
         else:
             self.embedding = embedding
         if pos_encoder is None:
-            self.pos_encoder = PositionalEncoding(8, dropout)
+            self.pos_encoder = PositionalEncoding(d_model, dropout)
         else:
             self.pos_encoder = pos_encoder
 
@@ -48,7 +48,7 @@ class SDFAProjector(nn.Module):
 
 
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, dropout=0.1, max_len=500):
+    def __init__(self, d_model, dropout=0.1, max_len=5000):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
 
@@ -92,6 +92,35 @@ def entropic_relevance_loss(sdfa_pred, sequences, num_symbols, eps=1e-9):
     return rel.mean()
 
 
+def entropic_relevance_diff_local_loss(sdfa_pred, sdfa_target, eps=1e-9):
+    B, S, _ = sdfa_pred.shape
+
+    s = sdfa_pred.clamp(min=eps, max=1 - eps)
+    L_A = s / (s.sum(dim=-1, keepdim=True) + eps)
+
+    rho = sdfa_target
+    fallback_bits = -torch.log2(rho.clamp(min=eps))
+
+    s_no_pad = s[:, :, 1:]        # remove pad column
+    L_A_no_pad = L_A[:, :, 1:]
+    s_no_pad = s_no_pad[:, 1:, :]
+    L_A_no_pad = L_A_no_pad[:, 1:, :]
+
+    # cost_bits = s * (-torch.log2(L_A)) + (1 - s) * fallback_bits
+    min_dim = min(s_no_pad.size(1), fallback_bits.size(1))
+    s_no_pad = s_no_pad[:, :min_dim, :min_dim]
+    L_A_no_pad = L_A_no_pad[:, :min_dim, :min_dim]
+    fallback_bits = fallback_bits[:, :min_dim, :min_dim]
+
+    cost_bits = s_no_pad * (-torch.log2(L_A_no_pad)) + (1 - s_no_pad) * fallback_bits
+    avg_cost_bits = torch.mean(cost_bits.view(B, -1), dim=1)  # per batch
+
+    rho_flat = L_A.view(B, -1).clamp(min=eps)
+    entropy = -torch.sum(rho_flat * torch.log2(rho_flat), dim=1)
+
+    rel = entropy + avg_cost_bits
+    return rel.mean()
+
 def entropic_relevance_diff_loss(sdfa_pred, sdfa_target, eps=1e-9):
     B, S, _ = sdfa_pred.shape
 
@@ -101,7 +130,18 @@ def entropic_relevance_diff_loss(sdfa_pred, sdfa_target, eps=1e-9):
     rho = sdfa_target
     fallback_bits = -torch.log2(rho.clamp(min=eps))
 
-    cost_bits = s * (-torch.log2(L_A)) + (1 - s) * fallback_bits
+    s_no_pad = s[:, 1:, 1:]         # remove first row & column (padding)
+    L_A_no_pad = L_A[:, 1:, 1:]  
+    # fallback_bits_no_pad = fallback_bits[:, 1:, 1:]
+    min_dim = min(s_no_pad.size(1), fallback_bits.size(1))
+    s_no_pad = s_no_pad[:, :min_dim, :min_dim]
+    L_A_no_pad = L_A_no_pad[:, :min_dim, :min_dim]
+    fallback_bits = fallback_bits[:, :min_dim, :min_dim]
+
+    cost_bits = s_no_pad * (-torch.log2(L_A_no_pad)) + (1 - s_no_pad) * fallback_bits
+
+    # cost_bits = s * (-torch.log2(L_A)) + (1 - s) * fallback_bits
+    # cost_bits = s_no_pad * (-torch.log2(L_A_no_pad)) + (1 - s_no_pad) * fallback_bits_no_pad
     avg_cost_bits = torch.mean(cost_bits.view(B, -1), dim=1)  # per batch
 
     rho_flat = L_A.view(B, -1).clamp(min=eps)
