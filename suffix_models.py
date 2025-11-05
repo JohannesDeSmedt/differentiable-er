@@ -15,7 +15,7 @@ from create_Seq2Seq import Decoder as LSTM_decoder
 from model_help import EventTransformer, SDFAProjector, PositionalEncoding, entropic_relevance_diff_loss, entropic_relevance_diff_local_loss
 
 
-def collate_batch_w_local_targets(batch, max_case_len, sos_token=1000, pad_token=0):
+def collate_batch_w_local_targets(batch, num_symbols, sos_token=1000, pad_token=0):
     xs, ys, _ = zip(*batch)  # we ignore the global sdfas, will recompute locally
 
     max_len_x = max(len(seq) for seq in xs)
@@ -43,7 +43,7 @@ def collate_batch_w_local_targets(batch, max_case_len, sos_token=1000, pad_token
     y_out = torch.tensor(padded_y_out, dtype=torch.long)
 
     y_sequences = [[yi] if isinstance(yi, int) else yi for yi in ys]
-    sdfa_targets = sequences_to_sdfa_tensor(y_sequences, num_symbols=max(x.max().item(), y_out.max().item()))
+    sdfa_targets = sequences_to_sdfa_tensor(y_sequences, num_symbols)#num_symbols=max(x.max().item(), y_out.max().item()))
 
     # Add batch dimension if needed
     if sdfa_targets.dim() == 2:
@@ -52,7 +52,7 @@ def collate_batch_w_local_targets(batch, max_case_len, sos_token=1000, pad_token
     return x, mask, y_in, y_out, sdfa_targets
 
 
-def collate_batch_w_targets(batch, max_case_len, sos_token=1000, pad_token=0):
+def collate_batch_w_targets(batch, num_symbols, sos_token=1000, pad_token=0):
     xs, ys, sdfas = zip(*batch)  # unpack input/target pairs
 
     max_len_x = max(len(seq) for seq in xs)
@@ -193,7 +193,7 @@ class SDFA_suffix_model_LSTM(nn.Module):
 
 
 
-def train_suffix_model(model, le, sequences, optimizer, max_case_len, er_loss, mix_lambda, device, local=False, batch_size=32, num_epochs=10):
+def train_suffix_model(model, le, sequences, optimizer, er_loss, mix_lambda, device, local=False, batch_size=32, num_epochs=10):
     model = model.to(device)
     model.train()
     epoch_time = 0
@@ -206,10 +206,10 @@ def train_suffix_model(model, le, sequences, optimizer, max_case_len, er_loss, m
         train_dataset = EventDatasetTargets(prefixes, suffixes, target_dfg_tensors, False, pad_token=0)
         if local:
             dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False,
-                                    collate_fn=lambda b: collate_batch_w_local_targets(b, max_case_len=max_case_len, sos_token=le.len()+1))
+                                    collate_fn=lambda b: collate_batch_w_local_targets(b, num_symbols=len(le.classes_), sos_token=le.len()+1))
         else:
             dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False,
-                        collate_fn=lambda b: collate_batch_w_targets(b, max_case_len=max_case_len, sos_token=le.len()+1))
+                        collate_fn=lambda b: collate_batch_w_targets(b, num_symbols=len(le.classes_), sos_token=le.len()+1))
 
         batch_tqdm = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs} Progress", leave=False)
         
@@ -245,10 +245,10 @@ def train_suffix_model(model, le, sequences, optimizer, max_case_len, er_loss, m
                 suffix_logits = model(x, mask, y_in)
 
             if er_loss:
-                if local:
-                    entropic_loss = entropic_relevance_diff_local_loss(sdfa_pred, sdfa_target)
-                else:
-                    entropic_loss = entropic_relevance_diff_loss(sdfa_pred, sdfa_target)
+                # if local:
+                    # entropic_loss = entropic_relevance_diff_local_loss(sdfa_pred, sdfa_target)
+                # else:
+                entropic_loss = entropic_relevance_diff_loss(sdfa_pred, sdfa_target)
 
             seq_len_pred = suffix_logits.size(1)
             seq_len_target = y_out.size(1)
@@ -273,7 +273,7 @@ def train_suffix_model(model, le, sequences, optimizer, max_case_len, er_loss, m
 
     return epoch_time / num_epochs
 
-def evaluate_suffix_model(model, le, sequences, max_case_len, er_loss, device, local, batch_size=32):
+def evaluate_suffix_model(model, le, sequences, er_loss, device, local, batch_size=32):
     model.eval()
     total_loss = 0.0
     total_dl_distance = 0.0
@@ -283,10 +283,10 @@ def evaluate_suffix_model(model, le, sequences, max_case_len, er_loss, device, l
     test_dataset = EventDatasetTargets(prefixes, suffixes, target_dfg_tensors, False, pad_token=0)
     if local:
         dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, 
-                                collate_fn=lambda b: collate_batch_w_local_targets(b, max_case_len=max_case_len, sos_token=le.len()+1))
+                                collate_fn=lambda b: collate_batch_w_local_targets(b, num_symbols=len(le.classes_), sos_token=le.len()+1))
     else:
         dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, 
-                        collate_fn=lambda b: collate_batch_w_targets(b, max_case_len=max_case_len, sos_token=le.len()+1))
+                        collate_fn=lambda b: collate_batch_w_targets(b, num_symbols=len(le.classes_), sos_token=le.len()+1))
 
 
     with torch.no_grad():

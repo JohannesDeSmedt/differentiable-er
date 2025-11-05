@@ -33,7 +33,7 @@ def collate_batch_w_nap_targets(batch, pad_token=0):
 
     return x, mask, y, sdfa_targets
 
-def collate_batch_w_local_nap_targets(batch, pad_token=0):
+def collate_batch_w_local_nap_targets(batch, num_symbols, pad_token=0):
     """
     Collate function that dynamically computes SDFA targets based on the y (targets)
     in the current batch, instead of relying on precomputed global SDFA tensors.
@@ -56,7 +56,7 @@ def collate_batch_w_local_nap_targets(batch, pad_token=0):
 
     y_sequences = [[yi] if isinstance(yi, int) else yi for yi in ys]
 
-    num_symbols = int(max(x.max().item(), y.max().item()))
+    # num_symbols = int(max(x.max().item(), y.max().item()))
     sdfa_targets = sequences_to_sdfa_tensor(y_sequences, num_symbols=num_symbols)
 
     # Ensure shape is (B, num_symbols, num_symbols)
@@ -126,7 +126,7 @@ def train_NAP_model(model, le, sequences, optimizer, max_len, er_loss, mix_lambd
         prefixes, suffixes, target_dfg_tensors = extract_prefix_suffix_pairs(sequences, le, length=max_len)
         train_dataset = EventDatasetTargets(prefixes, suffixes, target_dfg_tensors, True, pad_token=0)
         if local:
-            dataloader = DataLoader(train_dataset, batch_size=128, shuffle=False, collate_fn=collate_batch_w_local_nap_targets)
+            dataloader = DataLoader(train_dataset, batch_size=128, shuffle=False, collate_fn=lambda b: collate_batch_w_local_nap_targets(b, num_symbols=len(le.classes_)))
         else:
             dataloader = DataLoader(train_dataset, batch_size=128, shuffle=False, collate_fn=collate_batch_w_nap_targets)
 
@@ -139,10 +139,10 @@ def train_NAP_model(model, le, sequences, optimizer, max_len, er_loss, mix_lambd
 
             if er_loss:
                 sdfa_pred, logits = model(x, mask)
-                if local:
-                    entropic_loss = entropic_relevance_diff_local_loss(sdfa_pred, sdfa_target)
-                else:
-                    entropic_loss = entropic_relevance_diff_loss(sdfa_pred, sdfa_target)
+                # if local:
+                    # entropic_loss = entropic_relevance_diff_local_loss(sdfa_pred, sdfa_target)
+                # else:
+                entropic_loss = entropic_relevance_diff_loss(sdfa_pred, sdfa_target)
             else:
                 logits = model(x,mask)
             loss_nap = F.cross_entropy(logits, y, ignore_index=0)
@@ -176,7 +176,7 @@ def evaluate_nap_model(model, le, sequences, max_len, er_loss, device, local=Fal
     prefixes, suffixes, target_dfg_tensors = extract_prefix_suffix_pairs(sequences, le, length=max_len)
     test_dataset = EventDatasetTargets(prefixes, suffixes, target_dfg_tensors, True, pad_token=0)
     if local:
-        dataloader = DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=False, collate_fn=collate_batch_w_local_nap_targets)
+        dataloader = DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=False, collate_fn=lambda b: collate_batch_w_local_nap_targets(b, num_symbols=len(le.classes_)))
     else: 
         dataloader = DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=False, collate_fn=collate_batch_w_nap_targets)
 
@@ -195,6 +195,8 @@ def evaluate_nap_model(model, le, sequences, max_len, er_loss, device, local=Fal
                 logits = model(x,mask)
             loss_nap = F.cross_entropy(logits, y)
             pred = logits.argmax(dim=-1)
+            pred = pred.cpu().numpy()
+            y = y.cpu().numpy()
             
             if er_loss:
                 loss = loss_nap + 0.5 * entropic_loss

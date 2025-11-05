@@ -10,9 +10,6 @@ from torch.utils.data import Dataset
 
 from sklearn.preprocessing import LabelEncoder
 
-device = torch.device("cpu" if torch.backends.mps.is_available() else "cpu")
-print(f"Using device: {device}")
-
 class EventDataset(Dataset):
     def __init__(self, sequences, pad_token=0):
         self.sequences = sequences
@@ -77,9 +74,6 @@ def extract_prefix_suffix_pairs(df, le, length=0, pad_token=0):
         n = len(activities)
 
         for i in range(1, n):  # prefix ends at i-1, target starts at i
-            # if len(activities[:i]) < 10:
-                # continue
-
             if length > 0:  
                 prefix = activities[max(0,i-length):i]     
             else:

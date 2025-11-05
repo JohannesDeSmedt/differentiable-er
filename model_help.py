@@ -5,9 +5,6 @@ import torch.nn as nn
 import numpy as np
 from torch.nn import functional as F
 
-device = torch.device("cpu" if torch.backends.mps.is_available() else "cpu")
-print(f"Using device: {device}")
-
 class EventTransformer(nn.Module):
     def __init__(self, vocab_size, embedding=None, pos_encoder=None, d_model=128, nhead=4, num_layers=2, dropout=0.1):
         super().__init__()
@@ -106,13 +103,13 @@ def entropic_relevance_diff_local_loss(sdfa_pred, sdfa_target, eps=1e-9):
     s_no_pad = s_no_pad[:, 1:, :]
     L_A_no_pad = L_A_no_pad[:, 1:, :]
 
-    # cost_bits = s * (-torch.log2(L_A)) + (1 - s) * fallback_bits
+    cost_bits = s * (-torch.log2(L_A)) + (1 - s) * fallback_bits
     min_dim = min(s_no_pad.size(1), fallback_bits.size(1))
     s_no_pad = s_no_pad[:, :min_dim, :min_dim]
     L_A_no_pad = L_A_no_pad[:, :min_dim, :min_dim]
     fallback_bits = fallback_bits[:, :min_dim, :min_dim]
 
-    cost_bits = s_no_pad * (-torch.log2(L_A_no_pad)) + (1 - s_no_pad) * fallback_bits
+    # cost_bits = s_no_pad * (-torch.log2(L_A_no_pad)) + (1 - s_no_pad) * fallback_bits
     avg_cost_bits = torch.mean(cost_bits.view(B, -1), dim=1)  # per batch
 
     rho_flat = L_A.view(B, -1).clamp(min=eps)
@@ -136,11 +133,20 @@ def entropic_relevance_diff_loss(sdfa_pred, sdfa_target, eps=1e-9):
     min_dim = min(s_no_pad.size(1), fallback_bits.size(1))
     s_no_pad = s_no_pad[:, :min_dim, :min_dim]
     L_A_no_pad = L_A_no_pad[:, :min_dim, :min_dim]
-    fallback_bits = fallback_bits[:, :min_dim, :min_dim]
+    # fallback_bits = fallback_bits[:, :min_dim, :min_dim]
 
-    cost_bits = s_no_pad * (-torch.log2(L_A_no_pad)) + (1 - s_no_pad) * fallback_bits
+    # cost_bits = s_no_pad * (-torch.log2(L_A_no_pad)) + (1 - s_no_pad) * fallback_bits
+    try:
+        cost_bits = s * (-torch.log2(L_A)) + (1 - s) * fallback_bits
+    except:
+        print('sdfa_pred shape:', sdfa_pred.shape)
+        print('sdfa_target shape:', sdfa_target.shape)
+        print('s shape:', s.shape)
+        print('L_A shape:', L_A.shape)
+        print('rho shape:', rho.shape)
+        print('fallback_bits shape:', fallback_bits.shape)
 
-    # cost_bits = s * (-torch.log2(L_A)) + (1 - s) * fallback_bits
+
     # cost_bits = s_no_pad * (-torch.log2(L_A_no_pad)) + (1 - s_no_pad) * fallback_bits_no_pad
     avg_cost_bits = torch.mean(cost_bits.view(B, -1), dim=1)  # per batch
 
