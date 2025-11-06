@@ -2,6 +2,10 @@ import torch
 from tqdm import tqdm
 import math
 
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+
 import torch.nn as nn
 from preprocessing import EventDatasetTargets
 from preprocessing import extract_prefix_suffix_pairs, sequences_to_sdfa_tensor
@@ -9,11 +13,12 @@ from torch.utils.data import DataLoader
 from torch.nn import functional as F
 import editdistance
 import time
+from scipy.optimize import linear_sum_assignment
 
 from create_Seq2Seq import Encoder as LSTM_encoder
 from create_Seq2Seq import Decoder as LSTM_decoder
 from model_help import EventTransformer, SDFAProjector, PositionalEncoding, entropic_relevance_diff_loss, entropic_relevance_diff_local_loss
-
+from entropic_relevance import calculate_entropic_relevance
 
 def collate_batch_w_local_targets(batch, num_symbols, sos_token=1000, pad_token=0):
     xs, ys, _ = zip(*batch)  # we ignore the global sdfas, will recompute locally
@@ -197,7 +202,14 @@ def train_suffix_model(model, le, sequences, optimizer, er_loss, mix_lambda, dev
     model = model.to(device)
     model.train()
     epoch_time = 0
+
+    ce_losses = []
+    er_losses = []
     
+    total_entropic_relevance_pred = 0
+    total_entropic_relevance_target = 0
+    total_sinkhorn_distance = 0
+
     for epoch in tqdm(range(num_epochs), desc="Epoch Progress"):
         epoch_start = time.perf_counter()  
         total_loss = 0.0
@@ -245,9 +257,6 @@ def train_suffix_model(model, le, sequences, optimizer, er_loss, mix_lambda, dev
                 suffix_logits = model(x, mask, y_in)
 
             if er_loss:
-                # if local:
-                    # entropic_loss = entropic_relevance_diff_local_loss(sdfa_pred, sdfa_target)
-                # else:
                 entropic_loss = entropic_relevance_diff_loss(sdfa_pred, sdfa_target)
 
             seq_len_pred = suffix_logits.size(1)
@@ -260,8 +269,28 @@ def train_suffix_model(model, le, sequences, optimizer, er_loss, mix_lambda, dev
             
             if er_loss:
                 loss = (1-mix_lambda) * loss_suffix + mix_lambda * entropic_loss
+                er_losses.append(entropic_loss.item())
             else:
                 loss = loss_suffix
+
+
+            for b in range(sdfa_pred.size(0)):
+                s = sdfa_pred[b]
+                L_A = s / (s.sum(dim=-1, keepdim=True) + 1e-9)
+                entropic_relevance_pred = calculate_entropic_relevance(L_A, y_out, le)
+                entropic_relevance_target = calculate_entropic_relevance(sdfa_target[b], y_out, le)
+            total_entropic_relevance_pred += entropic_relevance_pred / len(sdfa_pred)
+            total_entropic_relevance_target += entropic_relevance_target / len(sdfa_pred)
+
+            P = sdfa_pred.clone()
+            Q = sdfa_target.clone()
+            P /= P.sum(dim=(1, 2), keepdim=True)
+            Q /= Q.sum(dim=(1, 2), keepdim=True)
+
+            total_sinkhorn_distance += sinkhorn_distance_batch(P, Q, reg=0.1, num_iters=500)
+
+            ce_losses.append(loss_suffix.item())            
+
             loss.backward()
             optimizer.step()
 
@@ -270,6 +299,19 @@ def train_suffix_model(model, le, sequences, optimizer, er_loss, mix_lambda, dev
         epoch_end = time.perf_counter()            # ← 3. end
         epoch_time += epoch_end - epoch_start  
         print(f"Epoch {epoch+1}/{num_epochs} - Loss: {total_loss/len(sequences):.4f}")
+        print('Entropic relevance:', total_entropic_relevance_pred/len(sequences), total_entropic_relevance_target/len(sequences))
+        print('Sinkhorn distance:', total_sinkhorn_distance/len(sequences))
+
+    min_max_normalized_er_losses = [(e - min(er_losses))/(max(er_losses)-min(er_losses)) for e in er_losses]
+    min_max_normalized_ce_losses = [(e - min(ce_losses))/(max(ce_losses)-min(ce_losses)) for e in ce_losses]
+
+    plt.plot(min_max_normalized_ce_losses, label='Cross-Entropy Loss')
+    plt.plot(min_max_normalized_er_losses, label='Entropic Relevance Loss')
+    plt.xlabel('Batch')
+    plt.ylabel('Loss')
+    plt.title('Training Losses over Batches')
+    plt.legend()
+    plt.show()
 
     return epoch_time / num_epochs
 
@@ -297,9 +339,6 @@ def evaluate_suffix_model(model, le, sequences, er_loss, device, local, batch_si
             y_in, y_out = y_in.to(device), y_out.to(device)
             sdfa_target = sdfa_target.to(device)
 
-            # sdfa_pred, suffix_logits = model(x, mask, y_in)
-            # plot_sdfa_heatmap(sdfa_pred, sample_idx=0, title="Predicted SDFA (batch 0)")
-
             if type(model) == SDFA_suffix_model_LSTM:
                 embedded = model.embedding(x)
                 enc_states, hidden, cell = model.encoder(embedded)
@@ -310,9 +349,6 @@ def evaluate_suffix_model(model, le, sequences, er_loss, device, local, batch_si
             max_len = y_out.size(1)
             sos_token = y_in[0, 0].item()   # your SOS value
             eoc_index = le.transform(["EOC"])[0]
-            # if dl < 5:
-            #     print('Max len for generation:', max_len)
-            #     print('SOS token:', sos_token, 'EOC token:', eoc_index)
 
             generated = torch.full((batch_size, 1), sos_token, dtype=torch.long, device=device)
             for t in range(1, max_len):
@@ -327,9 +363,6 @@ def evaluate_suffix_model(model, le, sequences, er_loss, device, local, batch_si
                     next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
                     generated = torch.cat([generated, next_token], dim=1)
 
-                # if dl < 5:
-                #     print('Next token at step', t, ':', next_token.squeeze().cpu().tolist())
-                #     print('Generated so far:', generated.squeeze().cpu().tolist())
                 finished = (generated[:, -1] == eoc_index)
                 next_token[finished] = eoc_index
                 generated = torch.cat([generated, next_token], dim=1)
@@ -356,15 +389,8 @@ def evaluate_suffix_model(model, le, sequences, er_loss, device, local, batch_si
                     continue
                 distance, ctime = compute_avg_damerau_levenshtein(True, pred_seq, target_seq)
                 eval_time += ctime
-                # if dl < 5:
-                #     print(f"Sample {i} - DL distance: {distance} (Pred: {pred_seq}, Target: {target_seq}), Max len: {max_len}")
                 total_dl_distance += distance / max_len
 
-            # if dl < 5:  # only print first batch to keep output readable
-            #     print("\n=== Evaluation Sample ===")
-            #     print("Prefix (x):", x[0].tolist())
-            #     print("Target Suffix (y_out):", y_out[0].tolist())
-            #     print("Predicted Suffix:", generated[0].tolist())
 
     avg_dl_distance = total_dl_distance / len(sequences)
     print(f"Avg Damerau-Levenshtein distance on test set: {avg_dl_distance:.4f}")
@@ -376,8 +402,6 @@ def evaluate_suffix_model(model, le, sequences, er_loss, device, local, batch_si
 def compute_avg_damerau_levenshtein(use_np, suffix_pred_np, suffix_true_np):
     total_distance = 0.0
 
-    # suffix_pred_np = suffix_pred.cpu().numpy()
-    # suffix_true_np = suffix_true.cpu().numpy()
 
     begin_time = time.perf_counter()
     # for i in range(batch_size):
@@ -388,60 +412,86 @@ def compute_avg_damerau_levenshtein(use_np, suffix_pred_np, suffix_true_np):
 
 
         distance = editdistance.eval(pred_seq, true_seq)
-    # distance = damerau_levenshtein(pred_seq, true_seq)
 
-    # for i in range(batch_size):
-        # Remove padding (0)
-    else:
-        pred_seq = [x for x in suffix_pred_np if x != 0]
-        true_seq = [x for x in suffix_true_np if x != 0]
-
-        # distance = editdistance.eval(pred_seq, true_seq)
-        distance = damerau_levenshtein(pred_seq, true_seq)
     total_distance += distance
     end_time = time.perf_counter()
-    
 
     time_taken = end_time - begin_time
     # avg_distance = total_distance #/ batch_size
     return total_distance, time_taken
 
 
-def damerau_levenshtein(list1, 
-                        list2):
+def _cost_matrix_2d(height: int, width: int, device=None, eps=1e-8) -> torch.Tensor:
+    device = device or torch.device('cpu')
+    # coordinates of every pixel
+    y, x = torch.meshgrid(
+        torch.arange(height, device=device, dtype=torch.float32),
+        torch.arange(width, device=device, dtype=torch.float32),
+        indexing='ij',
+    )
+    coords = torch.stack([y.flatten(), x.flatten()], dim=1)   # (HW, 2)
+    # pairwise squared distances
+    diff = coords[:, None, :] - coords[None, :, :]           # (HW, HW, 2)
+    C = torch.norm(diff, dim=2) + eps                       # (HW, HW)
+    return C
 
-    len_1, len_2 = len(list1), len(list2)
 
-    dist = [[0 for _ in range(len_2 + 1)] for _ in range(len_1 + 1)]
+def sinkhorn_distance_batch(
+    P: torch.Tensor,          # (B, H, W)
+    Q: torch.Tensor,          # (B, H, W)
+    reg: float = 0.01,
+    num_iters: int = 500,
+    eps: float = 1e-8,
+    return_transport: bool = False,
+) -> torch.Tensor:
+    """
+    Batch version of the entropic‑regularised Wasserstein‑1 distance.
+    """
+    # 1️⃣ sanity
+    assert P.shape == Q.shape, "P and Q must have identical shapes."
+    B, H, W = P.shape
+    N = H * W
 
-    for i in range(len_1 + 1):
-        dist[i][0] = i
-    for j in range(len_2 + 1):
-        dist[0][j] = j
+    # 2️⃣ flatten histograms
+    a = P.reshape(B, N) + eps
+    b = Q.reshape(B, N) + eps
 
-    for i in range(1, len_1 + 1):
-        for j in range(1, len_2 + 1):
-            cost = 0 if list1[i - 1] == list2[j - 1] else 1
+    # 3️⃣ cost matrix (H,W grid)
+    y, x = torch.meshgrid(
+        torch.arange(H, device=P.device, dtype=torch.float32),
+        torch.arange(W, device=P.device, dtype=torch.float32),
+        indexing='ij',
+    )
+    coords = torch.stack([y.flatten(), x.flatten()], dim=1)   # (N, 2)
+    diff = coords[:, None, :] - coords[None, :, :]           # (N, N, 2)
+    C = torch.norm(diff, dim=2) + eps                        # (N, N)
 
-            dist[i][j] = min(
-                dist[i - 1][j] + 1,    # deletion
-                dist[i][j - 1] + 1,    # insertion
-                dist[i - 1][j - 1] + cost  # substitution
-            )
+    # 4️⃣ kernel
+    K = torch.exp(-C / reg)                                 # (N, N)
+    K_b = K.unsqueeze(0).expand(B, -1, -1)                  # (B, N, N)
 
-            if i > 1 and j > 1 and list1[i - 1] == list2[j - 2] and list1[i - 2] == list2[j - 1]:
-                dist[i][j] = min(
-                    dist[i][j],
-                    dist[i - 2][j - 2] + cost  # transposition
-                )
+    # 5️⃣ dual variables (uniform init)
+    u = torch.full((B, N), 1.0 / N, dtype=P.dtype, device=P.device)
+    v = torch.full((B, N), 1.0 / N, dtype=P.dtype, device=P.device)
 
-    dl_distance = dist[len_1][len_2]
+    # 6️⃣ Sinkhorn iterations
+    for _ in range(num_iters):
+        u = a / (torch.bmm(K_b, v.unsqueeze(-1)).squeeze(-1) + eps)
+        v = b / (torch.bmm(K_b.transpose(1, 2), u.unsqueeze(-1)).squeeze(-1) + eps)
 
-    return dl_distance
-    
+    # 7️⃣ transport plan
+    # diag(u) @ K @ diag(v)
+    diag_u = torch.diag_embed(u)           # (B, N, N)
+    diag_v = torch.diag_embed(v)           # (B, N, N)
+    T = torch.bmm(diag_u, torch.bmm(K_b, diag_v))  # (B, N, N)
 
-import matplotlib.pyplot as plt
-import seaborn as sns
+    # 8️⃣ distance
+    dist = (C[None, :, :] * T).sum(dim=(1, 2))   # (B,)
+
+    if return_transport:
+        return dist, T
+    return dist
+
 
 def plot_sdfa_heatmap(sdfa_tensor, sample_idx=0, title="SDFA Heatmap"):
     """

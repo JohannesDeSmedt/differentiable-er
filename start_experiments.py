@@ -67,34 +67,26 @@ def prepare_data(df: pd.DataFrame, unbiased_split_params: dict) -> Tuple[pd.Data
 
     df_with_new_rows = df.groupby("case:concept:name").apply(add_start_end_rows)
     df = df_with_new_rows.reset_index(drop=True)
-    print('Dataframe after adding SOC and EOC events:', df.head(), len(df))
     df = (
         df.groupby("case:concept:name", group_keys=False)  
         .apply(keep_first_of_consecutive_repeats)
         .reset_index(drop=True)
     )
-    print('Dataframe after removing consecutive duplicates:', df.head(), len(df))
-
-    df = df.sort_values(by=["case:concept:name", "time:timestamp"])
-    train, test = unbiased(df, **unbiased_split_params)
 
     case_lengths = df.groupby("case:concept:name").size()
     max_case_len = int(case_lengths.quantile(quantile))
     valid_cases = case_lengths[case_lengths <= max_case_len].index
     df = df[df["case:concept:name"].isin(valid_cases)]
-
     print(f'Max case length ({quantile} percentile):', max_case_len)
 
+    df = df.sort_values(by=["case:concept:name", "time:timestamp"])
+    train, test = unbiased(df, **unbiased_split_params)
 
     train = train.rename(columns={"case:concept:name": "case_id", "concept:name": "activity"})
     max_len = train.groupby("case_id").size().max() - 1
     test = test.rename(columns={"case:concept:name": "case_id", "concept:name": "activity"})
     
     le.fit(train["activity"])
-
-    # my_little_dict = {label: int(le.transform([label])[0]) for label in le.classes_}
-    # print('Activity to index mapping:', my_little_dict)
-
 
     df_train = encode_activities(train, le)
     # df_train = df_train.sample(10000)
@@ -117,12 +109,12 @@ import ssl
 
 suffix_prediction = True
 quantile = 0.95
-write = True
+write = False
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 
-for dataset in ['BPI19']:#"BPI20PrepaidTravelCosts", "BPI20RequestForPayment", "BPI20TravelPermitData"]:
+for dataset in ['BPI20PrepaidTravelCosts']:#"BPI20PrepaidTravelCosts", "BPI20RequestForPayment", "BPI20TravelPermitData"]:
     for suffix_prediction in [suffix_prediction]:
         log = EVENT_LOGS[dataset]()
         log_name = dataset
@@ -139,7 +131,7 @@ for dataset in ['BPI19']:#"BPI20PrepaidTravelCosts", "BPI20RequestForPayment", "
                     if not local and bs != 32:
                         continue
                     for no_epochs in [10]:
-                        for er_loss_use in [False, True]:#, False]:
+                        for er_loss_use in [True]:#, False]:
                             for d_model_p in [16, 32, 64]:
                                 if suffix_prediction:
                                     no_epochs = 20
