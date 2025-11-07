@@ -95,8 +95,8 @@ def extract_prefix_suffix_pairs(df, le, length=0, pad_token=0):
     target_dfgs = [dfgs for _ in range(len(input_sequences))]
 
     print(f"Extracted {len(input_sequences)} prefix/suffix pairs")
-    print(f"Example input: {input_sequences[0:2]}")
-    print(f"Example target: {target_sequences[0:2]}")
+    print(f"Example input: {input_sequences[0:10]}")
+    print(f"Example target: {target_sequences[0:10]}")
 
     return input_sequences, target_sequences, target_dfgs
 
@@ -232,9 +232,6 @@ class PaddedLabelEncoder:
                 encoded.append(len(self.le.classes_) + 1)
         return np.array(encoded)
     
-    # def transform(self, labels):
-    #     return self.le.transform(labels) + 1   # shift
-    
     def fit_transform(self, labels):
         return self.le.fit_transform(labels) + 1
     
@@ -249,6 +246,3 @@ class PaddedLabelEncoder:
         # Insert both PAD and UNK into vocab for clarity
         return np.insert(self.le.classes_, [len(self.le.classes_)], [self.unk_token])
 
-    # @property
-    # def classes_(self):
-    #     return self.le.classes_

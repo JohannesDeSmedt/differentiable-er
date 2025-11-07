@@ -11,7 +11,9 @@ from torch.nn import functional as F
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import time  
 
-from model_help import EventTransformer, SDFAProjector, entropic_relevance_diff_loss, entropic_relevance_diff_local_loss
+from model_help import EventTransformer, SDFAProjector, entropic_relevance_diff_loss
+from entropic_relevance import calculate_entropic_relevance
+
 
 
 def collate_batch_w_nap_targets(batch, pad_token=0):
@@ -119,6 +121,10 @@ def train_NAP_model(model, le, sequences, optimizer, max_len, er_loss, mix_lambd
 
     epoch_time = 0
 
+    ce_losses = []
+    er_losses = []
+    
+
     for epoch in tqdm(range(num_epochs), desc="Epoch Progress"):
         epoch_start = time.perf_counter()  
         total_loss = 0.0
@@ -143,6 +149,7 @@ def train_NAP_model(model, le, sequences, optimizer, max_len, er_loss, mix_lambd
                     # entropic_loss = entropic_relevance_diff_local_loss(sdfa_pred, sdfa_target)
                 # else:
                 entropic_loss = entropic_relevance_diff_loss(sdfa_pred, sdfa_target)
+                er_losses.append(entropic_loss.item())
             else:
                 logits = model(x,mask)
             loss_nap = F.cross_entropy(logits, y, ignore_index=0)
@@ -151,6 +158,9 @@ def train_NAP_model(model, le, sequences, optimizer, max_len, er_loss, mix_lambd
                 loss = (1- mix_lambda) * loss_nap + mix_lambda * entropic_loss
             else:
                 loss = loss_nap
+
+            ce_losses.append(loss_nap.item())       
+
             loss.backward()
             optimizer.step()
 
@@ -162,6 +172,9 @@ def train_NAP_model(model, le, sequences, optimizer, max_len, er_loss, mix_lambd
 
         print(f"Epoch {epoch+1}/{num_epochs} - Loss: {total_loss/len(sequences):.4f}")
     
+    min_max_normalized_er_losses = [(e - min(er_losses))/(max(er_losses)-min(er_losses)) for e in er_losses]
+    min_max_normalized_ce_losses = [(e - min(ce_losses))/(max(ce_losses)-min(ce_losses)) for e in ce_losses]
+
     return epoch_time / num_epochs
 
 
@@ -197,6 +210,27 @@ def evaluate_nap_model(model, le, sequences, max_len, er_loss, device, local=Fal
             pred = logits.argmax(dim=-1)
             pred = pred.cpu().numpy()
             y = y.cpu().numpy()
+
+            # if er_loss:
+            #     sdfa_pred, _ = model(x, mask, y_in)
+            #     batch_entropic_relevance_pred = 0
+            #     batch_entropic_relevance_target = 0
+            #     for b in range(sdfa_pred.size(0)):
+            #         s = sdfa_pred[b]
+            #         L_A = s / (s.sum(dim=-1, keepdim=True) + 1e-9)
+            #         entropic_relevance_pred = calculate_entropic_relevance(L_A, y_out, le)
+            #         entropic_relevance_target = calculate_entropic_relevance(sdfa_target[b], y_out, le)
+            #         batch_entropic_relevance_pred += entropic_relevance_pred / len(sdfa_pred)
+            #         batch_entropic_relevance_target += entropic_relevance_target / len(sdfa_pred)
+            #     total_entropic_relevance_pred += batch_entropic_relevance_pred / len(sdfa_pred)
+            #     total_entropic_relevance_target += batch_entropic_relevance_target / len(sdfa_pred)
+
+            #     P = sdfa_pred.clone()
+            #     Q = sdfa_target.clone()
+            #     print(P.shape, Q.shape)
+            #     P /= P.sum(dim=(1, 2), keepdim=True)
+            #     Q /= Q.sum(dim=(1, 2), keepdim=True)
+
             
             if er_loss:
                 loss = loss_nap + 0.5 * entropic_loss

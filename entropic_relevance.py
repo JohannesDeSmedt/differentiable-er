@@ -91,8 +91,6 @@ def convert_dfg_into_automaton(nodes, arcs):
             if arc['to'] in sources:
                 sources.remove(arc['to'])
 
-    # print('Outgoing frequencies:')
-    # print(agg_outgoing_frequency)
 
     transitions = {}
     for arc in arcs:
@@ -129,24 +127,6 @@ def convert_dfg_into_automaton(nodes, arcs):
     for (t_from, label), (t_to, prob) in transitions.items():
         g.add_edge(t_from, t_to, label=label+' - ' + str(round(prob,3)))
 
-    # for start, edge in transitions.items():
-    #     print(start, edge)
-
-    # for node in g.nodes:
-    #     if g.in_degree(node) == 0:
-    #         print(f'{node} has no entries')
-    #     if g.out_degree(node) == 0:
-    #         print(f'{node} has no exits')
-    #         for edge in g.in_edges(node):
-    #             print(g.get_edge_data(edge[0], edge[1]))
-
-    # dot = nx.drawing.nx_pydot.to_pydot(g)
-    # file_name = './dfgs/temp3'
-    # with open(file_name + '.dot', 'w') as file:
-    #     file.write(str(dot))
-    # check_call(['dot', '-Tpng', file_name + '.dot', '-o', file_name + '.png'])
-    # os.remove(file_name + '.dot')
-
     tR = set()
     for source in sources:
         available = False
@@ -162,11 +142,6 @@ def convert_dfg_into_automaton(nodes, arcs):
     return sources, final_states, trans_table
 
 def sdfa_to_automaton(sdfa, id2label, eps=1e-9, threshold=1e-6):
-    """
-    Convert a single SDFA matrix (N x N) into:
-      sources, final_states, trans_table
-    compatible with your DFG evaluator.
-    """
 
     N = sdfa.size(0)
 
@@ -178,8 +153,8 @@ def sdfa_to_automaton(sdfa, id2label, eps=1e-9, threshold=1e-6):
     outgoing_prob = {i: 0.0 for i in range(N)}
 
     # Build transitions
-    for i in range(N):
-        for j in range(N):
+    for i in range(0, N):
+        for j in range(0, N):
             p = L[i, j].item()
             if p > threshold:
                 label = id2label[j]
@@ -201,7 +176,7 @@ def sdfa_to_automaton(sdfa, id2label, eps=1e-9, threshold=1e-6):
 
 def batch_to_event_log(x_batch, le):
     log = []
-    id2label = {i: label for i, label in enumerate(le.classes_)}
+    id2label = {int(le.transform([lbl])[0]):lbl for i, lbl in enumerate(le.classes_)}
 
     for seq in x_batch:
         events = []
@@ -217,9 +192,8 @@ def batch_to_event_log(x_batch, le):
 
 def calculate_entropic_relevance(sdfa, x, le):
 
-    id2label = {i: lbl for i, lbl in enumerate(le.classes_)}
+    id2label = {int(le.transform([lbl])[0])-1:lbl for i, lbl in enumerate(le.classes_)}
     sources, final_states, trans_table = sdfa_to_automaton(sdfa, id2label)
-
     log = batch_to_event_log(x, le)
 
     # assert len(sources) == 1

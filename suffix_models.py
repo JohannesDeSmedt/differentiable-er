@@ -17,7 +17,7 @@ from scipy.optimize import linear_sum_assignment
 
 from create_Seq2Seq import Encoder as LSTM_encoder
 from create_Seq2Seq import Decoder as LSTM_decoder
-from model_help import EventTransformer, SDFAProjector, PositionalEncoding, entropic_relevance_diff_loss, entropic_relevance_diff_local_loss
+from model_help import EventTransformer, SDFAProjector, PositionalEncoding, entropic_relevance_diff_loss
 from entropic_relevance import calculate_entropic_relevance
 
 def collate_batch_w_local_targets(batch, num_symbols, sos_token=1000, pad_token=0):
@@ -206,10 +206,6 @@ def train_suffix_model(model, le, sequences, optimizer, er_loss, mix_lambda, dev
     ce_losses = []
     er_losses = []
     
-    total_entropic_relevance_pred = 0
-    total_entropic_relevance_target = 0
-    total_sinkhorn_distance = 0
-
     for epoch in tqdm(range(num_epochs), desc="Epoch Progress"):
         epoch_start = time.perf_counter()  
         total_loss = 0.0
@@ -273,22 +269,6 @@ def train_suffix_model(model, le, sequences, optimizer, er_loss, mix_lambda, dev
             else:
                 loss = loss_suffix
 
-
-            for b in range(sdfa_pred.size(0)):
-                s = sdfa_pred[b]
-                L_A = s / (s.sum(dim=-1, keepdim=True) + 1e-9)
-                entropic_relevance_pred = calculate_entropic_relevance(L_A, y_out, le)
-                entropic_relevance_target = calculate_entropic_relevance(sdfa_target[b], y_out, le)
-            total_entropic_relevance_pred += entropic_relevance_pred / len(sdfa_pred)
-            total_entropic_relevance_target += entropic_relevance_target / len(sdfa_pred)
-
-            P = sdfa_pred.clone()
-            Q = sdfa_target.clone()
-            P /= P.sum(dim=(1, 2), keepdim=True)
-            Q /= Q.sum(dim=(1, 2), keepdim=True)
-
-            total_sinkhorn_distance += sinkhorn_distance_batch(P, Q, reg=0.1, num_iters=500)
-
             ce_losses.append(loss_suffix.item())            
 
             loss.backward()
@@ -299,19 +279,17 @@ def train_suffix_model(model, le, sequences, optimizer, er_loss, mix_lambda, dev
         epoch_end = time.perf_counter()            # ← 3. end
         epoch_time += epoch_end - epoch_start  
         print(f"Epoch {epoch+1}/{num_epochs} - Loss: {total_loss/len(sequences):.4f}")
-        print('Entropic relevance:', total_entropic_relevance_pred/len(sequences), total_entropic_relevance_target/len(sequences))
-        print('Sinkhorn distance:', total_sinkhorn_distance/len(sequences))
 
     min_max_normalized_er_losses = [(e - min(er_losses))/(max(er_losses)-min(er_losses)) for e in er_losses]
     min_max_normalized_ce_losses = [(e - min(ce_losses))/(max(ce_losses)-min(ce_losses)) for e in ce_losses]
 
-    plt.plot(min_max_normalized_ce_losses, label='Cross-Entropy Loss')
-    plt.plot(min_max_normalized_er_losses, label='Entropic Relevance Loss')
-    plt.xlabel('Batch')
-    plt.ylabel('Loss')
-    plt.title('Training Losses over Batches')
-    plt.legend()
-    plt.show()
+    # plt.plot(min_max_normalized_ce_losses, label='Cross-Entropy Loss')
+    # plt.plot(min_max_normalized_er_losses, label='Entropic Relevance Loss')
+    # plt.xlabel('Batch')
+    # plt.ylabel('Loss')
+    # plt.title('Training Losses over Batches')
+    # plt.legend()
+    # plt.show()
 
     return epoch_time / num_epochs
 
@@ -331,6 +309,10 @@ def evaluate_suffix_model(model, le, sequences, er_loss, device, local, batch_si
                         collate_fn=lambda b: collate_batch_w_targets(b, num_symbols=len(le.classes_), sos_token=le.len()+1))
 
 
+    total_entropic_relevance_pred = 0
+    total_entropic_relevance_target = 0
+    total_sinkhorn_distance = 0
+
     with torch.no_grad():
         print('Starting evaluation...')
         for dl, (x, mask, y_in, y_out, sdfa_target) in enumerate(dataloader):
@@ -344,6 +326,29 @@ def evaluate_suffix_model(model, le, sequences, er_loss, device, local, batch_si
                 enc_states, hidden, cell = model.encoder(embedded)
             else:
                 memory = model.encoder(x, mask)
+
+
+            if er_loss:
+                sdfa_pred, _ = model(x, mask, y_in)
+                batch_entropic_relevance_pred = 0
+                batch_entropic_relevance_target = 0
+                for b in range(sdfa_pred.size(0)):
+                    s = sdfa_pred[b]
+                    L_A = s / (s.sum(dim=-1, keepdim=True) + 1e-9)
+                    entropic_relevance_pred = calculate_entropic_relevance(L_A, y_out, le)
+                    entropic_relevance_target = calculate_entropic_relevance(sdfa_target[b], y_out, le)
+                    batch_entropic_relevance_pred += entropic_relevance_pred / len(sdfa_pred)
+                    batch_entropic_relevance_target += entropic_relevance_target / len(sdfa_pred)
+                total_entropic_relevance_pred += batch_entropic_relevance_pred / len(sdfa_pred)
+                total_entropic_relevance_target += batch_entropic_relevance_target / len(sdfa_pred)
+
+                P = sdfa_pred.clone()
+                Q = sdfa_target.clone()
+                P /= P.sum(dim=(1, 2), keepdim=True)
+                Q /= Q.sum(dim=(1, 2), keepdim=True)
+
+                # total_sinkhorn_distance += sinkhorn_distance_batch(P, Q, reg=0.1, num_iters=500).mean()
+
 
             batch_size = x.size(0)
             max_len = y_out.size(1)
@@ -396,7 +401,9 @@ def evaluate_suffix_model(model, le, sequences, er_loss, device, local, batch_si
     print(f"Avg Damerau-Levenshtein distance on test set: {avg_dl_distance:.4f}")
     print(f"Evaluation Loss: {total_loss / len(dataloader):.4f}")
     print('Evaluation time for DL computation:', eval_time, 'seconds')
-    return total_loss/len(dataloader), avg_dl_distance
+    print('Entropic relevance:', total_entropic_relevance_pred/len(sequences), total_entropic_relevance_target/len(sequences))
+    print('Sinkhorn distance:', total_sinkhorn_distance/len(sequences))
+    return total_loss/len(dataloader), avg_dl_distance, total_entropic_relevance_pred/len(sequences), total_entropic_relevance_target/len(sequences)
 
 
 def compute_avg_damerau_levenshtein(use_np, suffix_pred_np, suffix_true_np):
@@ -419,21 +426,6 @@ def compute_avg_damerau_levenshtein(use_np, suffix_pred_np, suffix_true_np):
     time_taken = end_time - begin_time
     # avg_distance = total_distance #/ batch_size
     return total_distance, time_taken
-
-
-def _cost_matrix_2d(height: int, width: int, device=None, eps=1e-8) -> torch.Tensor:
-    device = device or torch.device('cpu')
-    # coordinates of every pixel
-    y, x = torch.meshgrid(
-        torch.arange(height, device=device, dtype=torch.float32),
-        torch.arange(width, device=device, dtype=torch.float32),
-        indexing='ij',
-    )
-    coords = torch.stack([y.flatten(), x.flatten()], dim=1)   # (HW, 2)
-    # pairwise squared distances
-    diff = coords[:, None, :] - coords[None, :, :]           # (HW, HW, 2)
-    C = torch.norm(diff, dim=2) + eps                       # (HW, HW)
-    return C
 
 
 def sinkhorn_distance_batch(
