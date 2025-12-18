@@ -198,13 +198,15 @@ class SDFA_suffix_model_LSTM(nn.Module):
 
 
 
-def train_suffix_model(model, le, sequences, optimizer, er_loss, mix_lambda, device, local=False, batch_size=32, num_epochs=10):
+def train_suffix_model(dataset, model, le, sequences, optimizer, er_loss, mix_lambda, device, local=False, batch_size=32, num_epochs=10):
     model = model.to(device)
     model.train()
     epoch_time = 0
 
     ce_losses = []
     er_losses = []
+    epoch_loss_er = []
+    epoch_loss_ce = []
     
     for epoch in tqdm(range(num_epochs), desc="Epoch Progress"):
         epoch_start = time.perf_counter()  
@@ -277,19 +279,26 @@ def train_suffix_model(model, le, sequences, optimizer, er_loss, mix_lambda, dev
             total_loss += loss.item()
 
         epoch_end = time.perf_counter()            # ← 3. end
-        epoch_time += epoch_end - epoch_start  
+        epoch_time += epoch_end - epoch_start 
+        epoch_loss_er.append(sum(er_losses) / len(er_losses))
+        epoch_loss_ce.append(sum(ce_losses) / len(ce_losses))
+        er_losses.clear()
+        ce_losses.clear() 
         print(f"Epoch {epoch+1}/{num_epochs} - Loss: {total_loss/len(sequences):.4f}")
 
-    min_max_normalized_er_losses = [(e - min(er_losses))/(max(er_losses)-min(er_losses)) for e in er_losses]
-    min_max_normalized_ce_losses = [(e - min(ce_losses))/(max(ce_losses)-min(ce_losses)) for e in ce_losses]
+    min_max_normalized_er_losses = [(e - min(epoch_loss_er))/(max(epoch_loss_er)-min(epoch_loss_er)) for e in epoch_loss_er]
+    min_max_normalized_ce_losses = [(e - min(epoch_loss_ce))/(max(epoch_loss_ce)-min(epoch_loss_ce)) for e in epoch_loss_ce]
 
-    # plt.plot(min_max_normalized_ce_losses, label='Cross-Entropy Loss')
-    # plt.plot(min_max_normalized_er_losses, label='Entropic Relevance Loss')
-    # plt.xlabel('Batch')
-    # plt.ylabel('Loss')
-    # plt.title('Training Losses over Batches')
-    # plt.legend()
-    # plt.show()
+    plt.plot(min_max_normalized_ce_losses, label='Cross-Entropy Loss')
+    plt.plot(min_max_normalized_er_losses, label='DIFF-ERO')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    # plt.title('Training NAP Losses over Batches')
+    plt.legend()
+    plt.savefig(f'training_losses_suffix_{dataset}.png')
+    plt.show()
+
+
 
     return epoch_time / num_epochs
 
@@ -332,22 +341,30 @@ def evaluate_suffix_model(model, le, sequences, er_loss, device, local, batch_si
                 sdfa_pred, _ = model(x, mask, y_in)
                 batch_entropic_relevance_pred = 0
                 batch_entropic_relevance_target = 0
-                for b in range(sdfa_pred.size(0)):
-                    s = sdfa_pred[b]
-                    L_A = s / (s.sum(dim=-1, keepdim=True) + 1e-9)
-                    entropic_relevance_pred = calculate_entropic_relevance(L_A, y_out, le)
-                    entropic_relevance_target = calculate_entropic_relevance(sdfa_target[b], y_out, le)
-                    batch_entropic_relevance_pred += entropic_relevance_pred / len(sdfa_pred)
-                    batch_entropic_relevance_target += entropic_relevance_target / len(sdfa_pred)
-                total_entropic_relevance_pred += batch_entropic_relevance_pred / len(sdfa_pred)
-                total_entropic_relevance_target += batch_entropic_relevance_target / len(sdfa_pred)
+                if not local:
+                    for b in range(sdfa_pred.size(0)):
+                        s = sdfa_pred[b]
+                        L_A = s / (s.sum(dim=-1, keepdim=True) + 1e-9)
+                        entropic_relevance_pred = calculate_entropic_relevance(L_A, y_out, le)
+                        entropic_relevance_target = calculate_entropic_relevance(sdfa_target[b], y_out, le)
+                        batch_entropic_relevance_pred += entropic_relevance_pred / len(sdfa_pred)
+                        batch_entropic_relevance_target += entropic_relevance_target / len(sdfa_pred)
+                    total_entropic_relevance_pred += batch_entropic_relevance_pred / len(sdfa_pred)
+                    total_entropic_relevance_target += batch_entropic_relevance_target / len(sdfa_pred)
+                else:
+                    sdfa_pred, _ = model(x, mask, y_in)
+                    batch_entropic_relevance_pred = 0
+                    batch_entropic_relevance_target = 0
+                    for b in range(sdfa_pred.size(0)):
+                        s = sdfa_pred[b]
+                        L_A = s / (s.sum(dim=-1, keepdim=True) + 1e-9)
+                        entropic_relevance_pred = calculate_entropic_relevance(L_A, y_out, le)
+                        entropic_relevance_target = calculate_entropic_relevance(sdfa_target[0], y_out, le)
+                        batch_entropic_relevance_pred += entropic_relevance_pred / len(sdfa_pred)
+                        batch_entropic_relevance_target += entropic_relevance_target / len(sdfa_pred)
+                    total_entropic_relevance_pred += batch_entropic_relevance_pred / len(sdfa_pred)
+                    total_entropic_relevance_target += batch_entropic_relevance_target / len(sdfa_pred)
 
-                P = sdfa_pred.clone()
-                Q = sdfa_target.clone()
-                P /= P.sum(dim=(1, 2), keepdim=True)
-                Q /= Q.sum(dim=(1, 2), keepdim=True)
-
-                # total_sinkhorn_distance += sinkhorn_distance_batch(P, Q, reg=0.1, num_iters=500).mean()
 
 
             batch_size = x.size(0)

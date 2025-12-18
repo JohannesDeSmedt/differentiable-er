@@ -13,7 +13,7 @@ import time
 
 from model_help import EventTransformer, SDFAProjector, entropic_relevance_diff_loss
 from entropic_relevance import calculate_entropic_relevance
-
+import matplotlib.pyplot as plt
 
 
 def collate_batch_w_nap_targets(batch, pad_token=0):
@@ -115,7 +115,7 @@ class NAP_model(nn.Module):
         return logits
     
 
-def train_NAP_model(model, le, sequences, optimizer, max_len, er_loss, mix_lambda, device, local=False, num_epochs=10, batch_size=128):
+def train_NAP_model(dataset, model, le, sequences, optimizer, max_len, er_loss, mix_lambda, device, local=False, num_epochs=10, batch_size=128):
     # model = model.to(device)
     # model.train()
 
@@ -123,7 +123,8 @@ def train_NAP_model(model, le, sequences, optimizer, max_len, er_loss, mix_lambd
 
     ce_losses = []
     er_losses = []
-    
+    epoch_loss_er = []
+    epoch_loss_ce = []
 
     for epoch in tqdm(range(num_epochs), desc="Epoch Progress"):
         epoch_start = time.perf_counter()  
@@ -168,12 +169,25 @@ def train_NAP_model(model, le, sequences, optimizer, max_len, er_loss, mix_lambd
         
         epoch_end = time.perf_counter()            # ← 3. end
         epoch_time += epoch_end - epoch_start       # ← 4. elapsed seconds
-
+        epoch_loss_er.append(sum(er_losses) / len(er_losses))
+        epoch_loss_ce.append(sum(ce_losses) / len(ce_losses))
+        er_losses.clear()
+        ce_losses.clear()
 
         print(f"Epoch {epoch+1}/{num_epochs} - Loss: {total_loss/len(sequences):.4f}")
     
-    min_max_normalized_er_losses = [(e - min(er_losses))/(max(er_losses)-min(er_losses)) for e in er_losses]
-    min_max_normalized_ce_losses = [(e - min(ce_losses))/(max(ce_losses)-min(ce_losses)) for e in ce_losses]
+    min_max_normalized_er_losses = [(e - min(epoch_loss_er))/(max(epoch_loss_er)-min(epoch_loss_er)) for e in epoch_loss_er]
+    min_max_normalized_ce_losses = [(e - min(epoch_loss_ce))/(max(epoch_loss_ce)-min(epoch_loss_ce)) for e in epoch_loss_ce]
+
+    plt.plot(min_max_normalized_ce_losses, label='Cross-Entropy Loss')
+    plt.plot(min_max_normalized_er_losses, label='DIFF-ERO')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    # plt.title('Training NAP Losses over Batches')
+    plt.legend()
+    plt.savefig(f'training_losses_nap_{dataset}.png')
+    plt.show()
+
 
     return epoch_time / num_epochs
 
@@ -200,10 +214,10 @@ def evaluate_nap_model(model, le, sequences, max_len, er_loss, device, local=Fal
 
             if er_loss:
                 sdfa_pred, logits = model(x, mask)
-                if local:
-                    entropic_loss = entropic_relevance_diff_local_loss(sdfa_pred, sdfa_target)
-                else:
-                    entropic_loss = entropic_relevance_diff_loss(sdfa_pred, sdfa_target)
+                # if local:
+                #     entropic_loss = entropic_relevance_diff_local_loss(sdfa_pred, sdfa_target)
+                # else:
+                entropic_loss = entropic_relevance_diff_loss(sdfa_pred, sdfa_target)
             else:
                 logits = model(x,mask)
             loss_nap = F.cross_entropy(logits, y)

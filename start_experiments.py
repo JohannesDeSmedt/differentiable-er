@@ -105,16 +105,18 @@ import ssl
 #     suffix_prediction = True
 # else:
 #     suffix_prediction = False
+# seed = int(arguments[3])
 # quantile = float(arguments[3])
 
-suffix_prediction = False
+suffix_prediction = True
 quantile = 0.95
-write = True
+write = False
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
+dataset = 'BPI19'
 
-for dataset in ['BPI12']:#"BPI20PrepaidTravelCosts", "BPI20RequestForPayment", "BPI20TravelPermitData"]:
+for dataset in [dataset]:#'BPI20PrepaidTravelCosts', "BPI20RequestForPayment", "BPI20TravelPermitData"]:
     for suffix_prediction in [suffix_prediction]:
         log = EVENT_LOGS[dataset]()
         log_name = dataset
@@ -123,38 +125,39 @@ for dataset in ['BPI12']:#"BPI20PrepaidTravelCosts", "BPI20RequestForPayment", "
 
         vocab_size = len(le.classes_) 
 
-        for seed in [56, 8, 15, 76, 23]:#56, 8, 15, 76, 23, 42, 4, 108, 16, 1089]:
+        for seed in [56]: #[42, 4, 108, 16, 1089]:#56, 8, 15, 76, 23, 42, 4, 108, 16, 1089]:
             torch.manual_seed(seed)
             np.random.seed(seed)
-            for local in [False, True]:
-                for bs in [16, 32, 64, 128]:
+            for local in [False]:
+                for bs in [32]: #, 32, 64, 128]:
                     if not local and bs != 32:
                         continue
                     for no_epochs in [10]:
-                        for er_loss_use in [False, True]:#, False]:
-                            for d_model_p in [16, 32, 64]:
+                        for er_loss_use in [True]:#, False]:
+                            for d_model_p in [16]:
                                 if suffix_prediction:
                                     no_epochs = 20
                                     if er_loss_use:
-                                        for mix_lambda in [0.1, 0.2, 0.5]:
+                                        for mix_lambda in [0.2]:#[0.1, 0.2, 0.5]:
                                             model = SDFA_suffix_model(vocab_size, d_model=d_model_p, sdfa_shape=(vocab_size, vocab_size)).to(device)
                                             optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
-                                            comp_time = train_suffix_model(model, le, train_loader, optimizer, er_loss_use, mix_lambda, device, local=local, batch_size=bs, num_epochs=no_epochs)
+                                            comp_time = train_suffix_model(log_name, model, le, train_loader, optimizer, er_loss_use, mix_lambda, device, local=local, batch_size=bs, num_epochs=no_epochs)
                                             er_loss, dl_distance, er_pred, er_target = evaluate_suffix_model(model, le, test_loader, er_loss_use, device, local, bs)
                                             if write:
                                                 write_results_to_csv(f'results_ns_suffix_prediction_ND_{log_name}.csv',
                                                     params={'seed': seed, 'local':local, 'quantile':quantile, 'model': model.__class__.__name__, 'lambda': mix_lambda, 'd_model': d_model_p, 'er_loss': er_loss_use, 'batch_size': bs, 'no_epochs': no_epochs},
                                                     results={'avg_dl_distance': dl_distance, 'time': comp_time, 'er_pred': er_pred, 'er_target': er_target}
                                                 )
+                                                exit(0)
                                     else:
                                         if local:
                                             continue
                                         mix_lambda = 0
                                         model = suffix_model(vocab_size, d_model=d_model_p).to(device)
                                         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-                                        comp_time = train_suffix_model(model, le, train_loader, optimizer, er_loss_use, mix_lambda, device, local=local, batch_size=bs, num_epochs=no_epochs)
-                                        er_loss, dl_distance = evaluate_suffix_model(model, le, test_loader, er_loss_use, device, local, bs)
+                                        comp_time = train_suffix_model(log_name, model, le, train_loader, optimizer, er_loss_use, mix_lambda, device, local=local, batch_size=bs, num_epochs=no_epochs)
+                                        er_loss, dl_distance, _, _ = evaluate_suffix_model(model, le, test_loader, er_loss_use, device, local, bs)
                                         if write:
                                             write_results_to_csv(f'results_ns_suffix_prediction_ND_{log_name}.csv',
                                                     params={'seed': seed,  'local':local, 'quantile':quantile, 'model': model.__class__.__name__, 'lambda': mix_lambda, 'd_model': d_model_p, 'er_loss': er_loss_use,'batch_size': bs, 'no_epochs': no_epochs},
@@ -162,10 +165,10 @@ for dataset in ['BPI12']:#"BPI20PrepaidTravelCosts", "BPI20RequestForPayment", "
                                             )
                                 else:
                                     if er_loss_use:
-                                        for mix_lambda in [0.1, 0.2, 0.5]:
+                                        for mix_lambda in [0.2]:
                                             model = SDFA_NAP_model(vocab_size, d_model=d_model_p, sdfa_shape=(vocab_size, vocab_size)).to(device)
                                             optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-                                            comp_time = train_NAP_model(model, le, train_loader, optimizer, max_len, er_loss_use, mix_lambda, device, local=local, num_epochs=no_epochs, batch_size=bs)
+                                            comp_time = train_NAP_model(log_name, model, le, train_loader, optimizer, max_len, er_loss_use, mix_lambda, device, local=local, num_epochs=no_epochs, batch_size=bs)
                                             er_loss, accuracy, precision, recall, f1 = evaluate_nap_model(model, le, test_loader, max_len, er_loss_use, device, local)
                                             if write:
                                                 write_results_to_csv(f'results_ns_nap_prediction_{log_name}.csv',
@@ -173,13 +176,14 @@ for dataset in ['BPI12']:#"BPI20PrepaidTravelCosts", "BPI20RequestForPayment", "
                                                         'd_model': d_model_p, 'er_loss': er_loss_use, 'batch_size': bs, 'no_epochs': no_epochs, 'max_len': max_len},
                                                 results={'recall': recall, 'precision': precision, 'f1': f1, 'accuracy': accuracy, 'time': comp_time}
                                                 )
+                                        exit(0)
                                     else:
                                         if local:
                                             continue
                                         mix_lambda = 0
                                         model = NAP_model(vocab_size, d_model=d_model_p, sdfa_shape=(vocab_size, vocab_size)).to(device)
                                         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-                                        comp_time = train_NAP_model(model, le, train_loader, optimizer, max_len, er_loss_use, mix_lambda, device, local=local, num_epochs=no_epochs, batch_size=bs)
+                                        comp_time = train_NAP_model(log_name, model, le, train_loader, optimizer, max_len, er_loss_use, mix_lambda, device, local=local, num_epochs=no_epochs, batch_size=bs)
                                         er_loss, accuracy, precision, recall, f1  = evaluate_nap_model(model, le, test_loader, max_len, er_loss_use, device, local)
                                         if write:
                                             write_results_to_csv(f'results_ns_nap_prediction_{log_name}.csv',
