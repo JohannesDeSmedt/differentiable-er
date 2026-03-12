@@ -11,7 +11,7 @@ from torch.nn import functional as F
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import time  
 
-from model_help import EventTransformer, SDFAProjector, entropic_relevance_diff_loss
+from model_help import EventTransformer, SDFAProjector, entropic_relevance_diff_loss, pairwise_rank_loss
 from entropic_relevance import calculate_entropic_relevance
 import matplotlib.pyplot as plt
 
@@ -35,11 +35,8 @@ def collate_batch_w_nap_targets(batch, pad_token=0):
 
     return x, mask, y, sdfa_targets
 
+
 def collate_batch_w_local_nap_targets(batch, num_symbols, pad_token=0):
-    """
-    Collate function that dynamically computes SDFA targets based on the y (targets)
-    in the current batch, instead of relying on precomputed global SDFA tensors.
-    """
     xs, ys, _ = zip(*batch)  # ignore precomputed sdfas
 
     # --- Pad the prefix sequences ---
@@ -90,9 +87,12 @@ class SingleTokenDecoder(nn.Module):
         return logits
 
 class SDFA_NAP_model(nn.Module):
-    def __init__(self, vocab_size, d_model, sdfa_shape):
+    def __init__(self, vocab_size, d_model, sdfa_shape, trans_model=EventTransformer):
         super().__init__()
-        self.encoder = EventTransformer(vocab_size, d_model=d_model)
+        if trans_model == None:
+            self.encoder = EventTransformer(vocab_size, d_model=d_model)
+        else:
+            self.encoder = trans_model(vocab_size, d_model=d_model)
         self.sdfa_proj = SDFAProjector(d_model, sdfa_shape)
         self.item_decoder = SingleTokenDecoder(d_model, vocab_size, pooling='mean')
 
@@ -104,9 +104,10 @@ class SDFA_NAP_model(nn.Module):
     
 
 class NAP_model(nn.Module):
-    def __init__(self, vocab_size, d_model, sdfa_shape):
+    def __init__(self, vocab_size, d_model, sdfa_shape, trans_model=EventTransformer):
         super().__init__()
-        self.encoder = EventTransformer(vocab_size, d_model=d_model)
+        self.encoder = trans_model(vocab_size, d_model=d_model)
+        # self.encoder = EventTransformer(vocab_size, d_model=d_model)
         self.item_decoder = SingleTokenDecoder(d_model, vocab_size, pooling='mean')
 
     def forward(self, x, mask):
@@ -115,10 +116,7 @@ class NAP_model(nn.Module):
         return logits
     
 
-def train_NAP_model(dataset, model, le, sequences, optimizer, max_len, er_loss, mix_lambda, device, local=False, num_epochs=10, batch_size=128):
-    # model = model.to(device)
-    # model.train()
-
+def train_NAP_model(dataset, model, le, sequences, optimizer, max_len, er_loss, mix_lambda, device, rank_loss=False, sdfa_ce=False, local=False, num_epochs=10, batch_size=32):
     epoch_time = 0
 
     ce_losses = []
@@ -133,9 +131,9 @@ def train_NAP_model(dataset, model, le, sequences, optimizer, max_len, er_loss, 
         prefixes, suffixes, target_dfg_tensors = extract_prefix_suffix_pairs(sequences, le, length=max_len)
         train_dataset = EventDatasetTargets(prefixes, suffixes, target_dfg_tensors, True, pad_token=0)
         if local:
-            dataloader = DataLoader(train_dataset, batch_size=128, shuffle=False, collate_fn=lambda b: collate_batch_w_local_nap_targets(b, num_symbols=len(le.classes_)))
+            dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, collate_fn=lambda b: collate_batch_w_local_nap_targets(b, num_symbols=len(le.classes_)))
         else:
-            dataloader = DataLoader(train_dataset, batch_size=128, shuffle=False, collate_fn=collate_batch_w_nap_targets)
+            dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_batch_w_nap_targets)
 
         batch_tqdm = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs} Progress", leave=False)
         
@@ -144,21 +142,30 @@ def train_NAP_model(dataset, model, le, sequences, optimizer, max_len, er_loss, 
 
             optimizer.zero_grad()
 
-            if er_loss:
+            if er_loss or sdfa_ce:
                 sdfa_pred, logits = model(x, mask)
-                # if local:
-                    # entropic_loss = entropic_relevance_diff_local_loss(sdfa_pred, sdfa_target)
-                # else:
-                entropic_loss = entropic_relevance_diff_loss(sdfa_pred, sdfa_target)
-                er_losses.append(entropic_loss.item())
             else:
                 logits = model(x,mask)
+
+            if er_loss:
+                entropic_loss = entropic_relevance_diff_loss(sdfa_pred, sdfa_target)
+                er_losses.append(entropic_loss.item())
+
+            if sdfa_ce:
+                ce_loss_sdfa = F.cross_entropy(sdfa_pred[0], sdfa_target[0])
+            if rank_loss:
+                rank_loss_nap = pairwise_rank_loss(logits, y, num_neg=5)
+
             loss_nap = F.cross_entropy(logits, y, ignore_index=0)
             
             if er_loss:
                 loss = (1- mix_lambda) * loss_nap + mix_lambda * entropic_loss
+            elif sdfa_ce:
+                loss = (1- mix_lambda) * loss_nap + mix_lambda * ce_loss_sdfa
             else:
                 loss = loss_nap
+            if rank_loss:
+                loss = rank_loss_nap
 
             ce_losses.append(loss_nap.item())       
 
@@ -167,9 +174,10 @@ def train_NAP_model(dataset, model, le, sequences, optimizer, max_len, er_loss, 
 
             total_loss += loss.item()
         
-        epoch_end = time.perf_counter()            # ← 3. end
-        epoch_time += epoch_end - epoch_start       # ← 4. elapsed seconds
-        epoch_loss_er.append(sum(er_losses) / len(er_losses))
+        epoch_end = time.perf_counter()            
+        epoch_time += epoch_end - epoch_start       
+        if er_loss:
+            epoch_loss_er.append(sum(er_losses) / len(er_losses))
         epoch_loss_ce.append(sum(ce_losses) / len(ce_losses))
         er_losses.clear()
         ce_losses.clear()
@@ -179,14 +187,14 @@ def train_NAP_model(dataset, model, le, sequences, optimizer, max_len, er_loss, 
     min_max_normalized_er_losses = [(e - min(epoch_loss_er))/(max(epoch_loss_er)-min(epoch_loss_er)) for e in epoch_loss_er]
     min_max_normalized_ce_losses = [(e - min(epoch_loss_ce))/(max(epoch_loss_ce)-min(epoch_loss_ce)) for e in epoch_loss_ce]
 
-    plt.plot(min_max_normalized_ce_losses, label='Cross-Entropy Loss')
-    plt.plot(min_max_normalized_er_losses, label='DIFF-ERO')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    # plt.title('Training NAP Losses over Batches')
-    plt.legend()
-    plt.savefig(f'training_losses_nap_{dataset}.png')
-    plt.show()
+    # plt.plot(min_max_normalized_ce_losses, label='Cross-Entropy Loss')
+    # plt.plot(min_max_normalized_er_losses, label='DIFF-ERO')
+    # plt.xlabel('Epoch')
+    # plt.ylabel('Loss')
+    # # plt.title('Training NAP Losses over Batches')
+    # plt.legend()
+    # plt.savefig(f'training_losses_nap_{dataset}.png')
+    # plt.show()
 
 
     return epoch_time / num_epochs

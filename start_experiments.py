@@ -108,13 +108,21 @@ import ssl
 # seed = int(arguments[3])
 # quantile = float(arguments[3])
 
-suffix_prediction = True
+suffix_prediction = False
 quantile = 0.95
 write = False
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-dataset = 'BPI19'
+dataset = 'BPI12'
+
+# NAP
+# NAP with rank loss
+# NAP with CE loss on SDFA
+
+# NAP with ER loss
+# NAP with local ER loss
+
 
 for dataset in [dataset]:#'BPI20PrepaidTravelCosts', "BPI20RequestForPayment", "BPI20TravelPermitData"]:
     for suffix_prediction in [suffix_prediction]:
@@ -133,7 +141,8 @@ for dataset in [dataset]:#'BPI20PrepaidTravelCosts', "BPI20RequestForPayment", "
                     if not local and bs != 32:
                         continue
                     for no_epochs in [10]:
-                        for er_loss_use in [True]:#, False]:
+
+                        for er_loss_use in [False]:#, False]:
                             for d_model_p in [16]:
                                 if suffix_prediction:
                                     no_epochs = 20
@@ -176,7 +185,6 @@ for dataset in [dataset]:#'BPI20PrepaidTravelCosts', "BPI20RequestForPayment", "
                                                         'd_model': d_model_p, 'er_loss': er_loss_use, 'batch_size': bs, 'no_epochs': no_epochs, 'max_len': max_len},
                                                 results={'recall': recall, 'precision': precision, 'f1': f1, 'accuracy': accuracy, 'time': comp_time}
                                                 )
-                                        exit(0)
                                     else:
                                         if local:
                                             continue

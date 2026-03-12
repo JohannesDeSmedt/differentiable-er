@@ -6,10 +6,39 @@ import numpy as np
 from torch.nn import functional as F
 
 class EventTransformer(nn.Module):
-    def __init__(self, vocab_size, embedding=None, pos_encoder=None, d_model=128, nhead=4, num_layers=2, dropout=0.1):
+    def __init__(self, vocab_size, embedding=None, pos_encoder='auto', d_model=128, nhead=4, num_layers=2, dropout=0.1):
         super().__init__()
         if embedding is None:
             self.embedding = nn.Embedding(vocab_size + 1, d_model, padding_idx=0)
+        else:
+            self.embedding = embedding
+        if pos_encoder is None:
+            self.pos_encoder = None #PositionalEncoding(d_model, dropout)
+        elif pos_encoder == 'auto':
+            self.pos_encoder = PositionalEncoding(d_model, dropout)
+        else:
+            self.pos_encoder = pos_encoder
+
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dropout=dropout, batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        self.d_model = d_model
+
+    def forward(self, x, mask):
+        embedded = self.embedding(x) * (self.d_model ** 0.5)
+        if self.pos_encoder is not None:
+            embedded = self.pos_encoder(embedded)
+
+        src_key_padding_mask = ~mask.bool()
+        output = self.transformer_encoder(embedded, src_key_padding_mask=src_key_padding_mask)
+        return output
+
+    
+class DFGAwareTransformer(nn.Module):
+    def __init__(self, vocab_size, embedding=None, pos_encoder=None, d_model=128, nhead=4, num_layers=2, dropout=0.1):
+        super().__init__()
+        if embedding is None:
+            self.embedding = DFGAwareEmbedding(vocab_size, d_model)
         else:
             self.embedding = embedding
         if pos_encoder is None:
@@ -23,13 +52,72 @@ class EventTransformer(nn.Module):
         self.d_model = d_model
 
     def forward(self, x, mask):
-        embedded = self.embedding(x) * (self.embedding.embedding_dim ** 0.5)
+        embedded = self.embedding(x) * (self.d_model ** 0.5)
         embedded = self.pos_encoder(embedded)
 
         src_key_padding_mask = ~mask.bool()
         output = self.transformer_encoder(embedded, src_key_padding_mask=src_key_padding_mask)
         return output
     
+class AutomatonAwareTransformer(nn.Module):
+    def __init__(
+        self,
+        vocab_size,
+        d_model=128,
+        nhead=4,
+        num_layers=2,
+        dropout=0.1,
+        num_states=16,
+    ):
+        super().__init__()
+
+        self.embedding = DFGAwareEmbedding(vocab_size, d_model)
+        self.automaton = SoftAutomaton(num_states, vocab_size, d_model)
+        self.pos_encoder = PositionalEncoding(d_model, dropout)
+
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dropout=dropout, batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        self.d_model = d_model
+
+    def forward(self, x, mask):
+        token_emb = self.embedding(x) * (self.d_model ** 0.5)
+        state_emb = self.automaton(x)
+
+        embedded = token_emb + state_emb
+
+        if self.pos_encoder is not None:
+            embedded = self.pos_encoder(embedded)
+
+        src_key_padding_mask = ~mask.bool()
+        output = self.transformer_encoder(
+            embedded,
+            src_key_padding_mask=src_key_padding_mask
+        )
+        return output
+
+
+def pairwise_rank_loss(logits, true_idx, num_neg=5):
+    # logits: [B, |A|]
+    # true_idx: [B]
+    device = logits.device  
+
+    B, A = logits.shape
+    loss = 0.0
+
+    for b in range(B):
+        pos = logits[b, true_idx[b]]
+
+        # sample negatives
+        neg_idx = torch.randperm(A)[:num_neg]
+        neg_idx = neg_idx.to(device)  
+        neg_idx = neg_idx[neg_idx != true_idx[b]]
+
+        neg = logits[b, neg_idx]
+        loss += torch.log1p(torch.exp(neg - pos)).mean()
+
+    return loss / B
+
 
 class SDFAProjector(nn.Module):
     def __init__(self, d_model, sdfa_shape):
@@ -61,6 +149,65 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         x = x + self.pe[:, :x.size(1), :]
         return self.dropout(x)
+    
+
+class DFGAwareEmbedding(nn.Module):
+
+    def __init__(self, vocab_size, d_model):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.act_emb = nn.Embedding(vocab_size + 1, d_model, padding_idx=0)
+        self.future_emb = nn.Embedding(vocab_size + 1, d_model, padding_idx=0)
+
+        nn.init.xavier_uniform_(self.act_emb.weight)
+        nn.init.xavier_uniform_(self.future_emb.weight)
+
+    def forward(self, acts):
+        return self.act_emb(acts) + self.future_emb(acts)
+
+
+class SoftAutomaton(nn.Module):
+
+    def __init__(self, num_states, vocab_size, d_model):
+        super().__init__()
+        self.num_states = num_states
+
+        self.state_emb = nn.Parameter(torch.randn(num_states, d_model))
+
+        # One transition matrix per activity
+        self.transitions = nn.Parameter(
+            torch.randn(vocab_size + 1 + 1, num_states, num_states)
+        )
+
+        nn.init.xavier_uniform_(self.transitions)
+
+    def forward(self, acts, alpha0=None):
+
+        B, T = acts.shape
+
+        if alpha0 is None:
+            alpha = torch.zeros(B, self.num_states, device=acts.device)
+            alpha[:, 0] = 1.0
+        else:
+            alpha = alpha0
+        # alpha = torch.zeros(B, self.num_states, device=device)
+        # alpha[:, 0] = 1.0  # start state
+
+        state_embeddings = []
+
+        for t in range(T):
+            a_t = acts[:, t]                       # (B,)
+            T_a = self.transitions[a_t]            # (B, S, S)
+
+            alpha = torch.bmm(alpha.unsqueeze(1), T_a).squeeze(1)
+            alpha = F.softmax(alpha, dim=-1)
+
+            s_t = alpha @ self.state_emb            # (B, d_model)
+            state_embeddings.append(s_t)
+
+        return torch.stack(state_embeddings, dim=1)
+
+
 
 def entropic_relevance_loss(sdfa_pred, sequences, num_symbols, eps=1e-9):
     # start van sequenties en maakt ground truth SDFA
