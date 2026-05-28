@@ -18,8 +18,8 @@ from skpm.event_logs import (
     BPI20PrepaidTravelCosts,
     BPI20TravelPermitData,
     BPI20RequestForPayment,
-    Sepsis
-
+    Sepsis,
+    BPI11, BPI13ClosedProblems, BPI13OpenProblems, BPI13Incidents
 )
 from skpm.event_logs.split import unbiased
 from preprocessing import encode_activities, PaddedLabelEncoder, encode_activities_with_dict
@@ -50,7 +50,10 @@ def add_start_end_rows(group):
     start_row = pd.DataFrame([{'case:concept:name': group.name, 'time:timestamp': earliest_ts - pd.Timedelta(seconds=1), 'concept:name': 'SOC'}])
     end_row = pd.DataFrame([{'case:concept:name': group.name, 'time:timestamp': latest_ts + pd.Timedelta(seconds=1), 'concept:name': 'EOC'}])
 
-    return pd.concat([group, start_row, end_row], ignore_index=True)
+    result = pd.concat([group, start_row, end_row], ignore_index=True)
+    result["case:concept:name"] = group.name  # pandas 3.0: groupby col excluded from group, so set explicitly
+    # was: return pd.concat([group, start_row, end_row], ignore_index=True)
+    return result
 
 
 EVENT_LOGS = {
@@ -62,6 +65,10 @@ EVENT_LOGS = {
     "BPI20TravelPermitData": BPI20TravelPermitData,
     "BPI20RequestForPayment": BPI20RequestForPayment,
     'Sepsis': Sepsis,
+    'BPI11': BPI11,  
+    'BPI13CP': BPI13ClosedProblems,
+    'BPI13OP': BPI13OpenProblems,
+    'BPI13Incidents': BPI13Incidents
 }
 
 le = PaddedLabelEncoder()
@@ -69,13 +76,15 @@ le = PaddedLabelEncoder()
 def prepare_data(df: pd.DataFrame, unbiased_split_params: dict) -> Tuple[pd.DataFrame, pd.DataFrame]:
     df = df.loc[:, ["case:concept:name", "concept:name", "time:timestamp"]]
 
+    print(df.head())
+    print(df.columns)
+
     df_with_new_rows = df.groupby("case:concept:name").apply(add_start_end_rows)
     df = df_with_new_rows.reset_index(drop=True)
-    df = (
-        df.groupby("case:concept:name", group_keys=False)  
-        .apply(keep_first_of_consecutive_repeats)
-        .reset_index(drop=True)
-    )
+    # pandas 3.0: groupby().apply() excludes groupby col from group, losing "case:concept:name" in result
+    # was: df = (df.groupby("case:concept:name", group_keys=False).apply(keep_first_of_consecutive_repeats).reset_index(drop=True))
+    shifted = df.groupby("case:concept:name")["concept:name"].shift()
+    df = df[df["concept:name"].ne(shifted)].reset_index(drop=True)
 
     case_lengths = df.groupby("case:concept:name").size()
     max_case_len = int(case_lengths.quantile(quantile))
@@ -107,17 +116,17 @@ import ssl
         
 # arguments = sys.argv
 # dataset = arguments[1]
-dataset = 'BPI15'
+dataset = 'BPI13'
 # if arguments[2].lower() == 'true':
 #     suffix_prediction = True
 # else:
 #     suffix_prediction = False
-# seed = int(arguments[3])
+# seed = int(arguments[2])
 # quantile = float(arguments[3])
 
 
 quantile = 0.95
-write = False
+write = True
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
@@ -133,6 +142,8 @@ print(f"Using device: {device}")
 
 if dataset == 'BPI20':
     datasets = ['BPI20PrepaidTravelCosts', "BPI20RequestForPayment", "BPI20TravelPermitData"]
+elif dataset == 'BPI13':
+    datasets = ['BPI13CP', 'BPI13Incidents']
 else:
     datasets = [dataset]
 
@@ -143,15 +154,15 @@ for dataset in datasets:#'BPI20PrepaidTravelCosts', "BPI20RequestForPayment", "B
     no_epochs = 10
     bs = 32
 
-    if  log_name == 'BPI15':
-        print(f"Skipping {log_name} because it does not have unbiased split parameters.")
+    if  log_name in {'BPI15','Sepsis','BPI11', 'BPI13CP', 'BPI13OP', 'BPI13Incidents'}:
+        print(f"Skipping unbiased split for {log_name} because it does not have unbiased split parameters.")
         unbiased_split_params = {'split_ratio': 0.8, 'random_state': 42}
     else:
         unbiased_split_params = log.unbiased_split_params
     train_loader, test_loader, max_len = prepare_data(log.dataframe, unbiased_split_params) 
     vocab_size = len(le.classes_) 
 
-    for seed in [42, 4, 108, 16, 1089]: #[42, 4, 108, 16, 1089]:#56, 8, 15, 76, 23, 42, 4, 108, 16, 1089]:
+    for seed in [56, 8, 15, 76, 23, 42, 4, 108, 16, 1089]: #[42, 4, 108, 16, 1089]:#56, 8, 15, 76, 23, 42, 4, 108, 16, 1089]:
         torch.manual_seed(seed)
         np.random.seed(seed)
 
@@ -161,11 +172,11 @@ for dataset in datasets:#'BPI20PrepaidTravelCosts', "BPI20RequestForPayment", "B
                     rank_loss_use = False
                     model = SDFA_NAP_model(vocab_size, d_model=d_model_p, sdfa_shape=(vocab_size, vocab_size)).to(device)
                     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-                    for mix_lambda in [0, 0.2, 0.5]:
-                        for sdfa_ce in [True]:
+                    for mix_lambda in [0, 0.1, 0.2, 0.5]:
+                        for sdfa_ce in [True, False]:
                             for local in [True, False]:
                                 if local:
-                                    for bs in [32, 64, 128]:
+                                    for bs in [16, 32, 64, 128]:
                                         comp_time = train_NAP_model(log_name, model, le, train_loader, optimizer, max_len, er_loss_use, mix_lambda, device, sdfa_ce=sdfa_ce, local=local, num_epochs=no_epochs, batch_size=bs)
                                         er_loss, accuracy, precision, recall, f1 = evaluate_nap_model(model, le, test_loader, max_len, er_loss_use, device, local)
                                         if write:
@@ -184,19 +195,20 @@ for dataset in datasets:#'BPI20PrepaidTravelCosts', "BPI20RequestForPayment", "B
                                         results={'recall': recall, 'precision': precision, 'f1': f1, 'accuracy': accuracy, 'time': comp_time}
                                         )
                 else:
-                    mix_lambda = 0
-                    local = False
-                    for rank_loss_use in [True]:#, False]:
-                        model = NAP_model(vocab_size, d_model=d_model_p, sdfa_shape=(vocab_size, vocab_size)).to(device)
-                        optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-                        comp_time = train_NAP_model(log_name, model, le, train_loader, optimizer, max_len, er_loss_use, mix_lambda, device, rank_loss=rank_loss_use, num_epochs=no_epochs, batch_size=bs)
-                        er_loss, accuracy, precision, recall, f1  = evaluate_nap_model(model, le, test_loader, max_len, er_loss_use, device, local)
-                        if write:
-                            write_results_to_csv(f'results_ns_nap_prediction_{log_name}.csv',
-                                params={'seed': seed, 'local':local, 'quantile':quantile, 'model': model.__class__.__name__, 'lambda': mix_lambda, 'd_model': d_model_p, 'er_loss': er_loss_use,
-                                        'batch_size': bs,  'no_epochs': no_epochs, 'max_len': max_len, 'rank_loss': rank_loss_use, 'sdfa_ce': False},
-                                results={'recall': recall, 'precision': precision, 'f1': f1, 'accuracy': accuracy, 'time': comp_time}
-                        )
+                    for bs in [32, 128]:
+                        mix_lambda = 0
+                        local = False
+                        for rank_loss_use in [True, False]:
+                            model = NAP_model(vocab_size, d_model=d_model_p, sdfa_shape=(vocab_size, vocab_size)).to(device)
+                            optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+                            comp_time = train_NAP_model(log_name, model, le, train_loader, optimizer, max_len, er_loss_use, mix_lambda, device, rank_loss=rank_loss_use, num_epochs=no_epochs, batch_size=bs)
+                            er_loss, accuracy, precision, recall, f1  = evaluate_nap_model(model, le, test_loader, max_len, er_loss_use, device, local)
+                            if write:
+                                write_results_to_csv(f'results_ns_nap_prediction_{log_name}.csv',
+                                    params={'seed': seed, 'local':local, 'quantile':quantile, 'model': model.__class__.__name__, 'lambda': mix_lambda, 'd_model': d_model_p, 'er_loss': er_loss_use,
+                                            'batch_size': bs,  'no_epochs': no_epochs, 'max_len': max_len, 'rank_loss': rank_loss_use, 'sdfa_ce': False},
+                                    results={'recall': recall, 'precision': precision, 'f1': f1, 'accuracy': accuracy, 'time': comp_time}
+                            )
 
 
 
