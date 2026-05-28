@@ -1,3 +1,4 @@
+# Install with: uv pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cu126
 peft==0.14.0
 scikit-learn==1.6.1
 skpm @ git+https://github.com/raseidi/skpm.git

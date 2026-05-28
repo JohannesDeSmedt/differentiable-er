@@ -24,7 +24,7 @@ from skpm.event_logs import (
 from skpm.event_logs.split import unbiased
 from preprocessing import encode_activities, PaddedLabelEncoder, encode_activities_with_dict
 from nap_models import SDFA_NAP_model, NAP_model, train_NAP_model, evaluate_nap_model
-from suffix_models import SDFA_suffix_model, SDFA_suffix_model_LSTM, suffix_model, train_suffix_model, evaluate_suffix_model
+# from suffix_models import SDFA_suffix_model, SDFA_suffix_model_LSTM, suffix_model, train_suffix_model, evaluate_suffix_model
 
 
 
@@ -116,7 +116,7 @@ import ssl
         
 # arguments = sys.argv
 # dataset = arguments[1]
-dataset = 'BPI13'
+dataset = 'BPI12'
 # if arguments[2].lower() == 'true':
 #     suffix_prediction = True
 # else:
@@ -142,8 +142,6 @@ print(f"Using device: {device}")
 
 if dataset == 'BPI20':
     datasets = ['BPI20PrepaidTravelCosts', "BPI20RequestForPayment", "BPI20TravelPermitData"]
-elif dataset == 'BPI13':
-    datasets = ['BPI13CP', 'BPI13Incidents']
 else:
     datasets = [dataset]
 
@@ -154,11 +152,7 @@ for dataset in datasets:#'BPI20PrepaidTravelCosts', "BPI20RequestForPayment", "B
     no_epochs = 10
     bs = 32
 
-    if  log_name in {'BPI15','Sepsis','BPI11', 'BPI13CP', 'BPI13OP', 'BPI13Incidents'}:
-        print(f"Skipping unbiased split for {log_name} because it does not have unbiased split parameters.")
-        unbiased_split_params = {'split_ratio': 0.8, 'random_state': 42}
-    else:
-        unbiased_split_params = log.unbiased_split_params
+    unbiased_split_params = log.unbiased_split_params
     train_loader, test_loader, max_len = prepare_data(log.dataframe, unbiased_split_params) 
     vocab_size = len(le.classes_) 
 
