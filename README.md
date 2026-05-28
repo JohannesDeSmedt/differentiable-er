@@ -1,4 +1,4 @@
-# Differentiable Entropic Relevance (DIFF-ERo)
+# DIFFerentiable EntRopic Process LOss (DIFF-ERO)
 
 Next Activity Prediction (NAP) for process event logs using a differentiable Entropic Relevance loss.
 
@@ -32,7 +32,7 @@ Results per dataset are appended to `results_ns_nap_prediction_<dataset>.csv`.
 
 ## Datasets
 
-BPI12, BPI13 (CP, Incidents), BPI15, BPI17, BPI19, BPI20 (PrepaidTravelCosts, RequestForPayment, TravelPermitData), Sepsis, BPI11 — loaded via `skpm`.
+BPI12, BPI13 (CP, Incidents), BPI15, BPI17, BPI19, BPI20 (PrepaidTravelCosts, RequestForPayment, TravelPermitData), Sepsis, BPI11 — loaded via `skpm` (https://github.com/raseidi/skpm).
 
 ## Setup
 
